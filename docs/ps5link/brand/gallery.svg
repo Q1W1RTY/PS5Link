@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="177" height="38" viewBox="0 0 177 38" role="img" aria-label="Gallery / Галерея">
+  <title>Gallery / Галерея</title>
+  <rect x=".5" y=".5" width="176" height="37" rx="18.5" fill="#22242c" stroke="#434b5c"/>
+  <g transform="translate(13 9)" fill="none" stroke="#e9f2ff" color="#e9f2ff" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><rect x="2.5" y="4" width="15" height="12" rx="2"/><path d="m4.5 14 4-4 3 3 2-2 2 2"/><circle cx="13.5" cy="7.5" r=".75" fill="currentColor" stroke="none"/></g>
+  <text x="42" y="24" fill="#f4f7fc" font-family="Segoe UI, Arial, sans-serif" font-size="13" font-weight="600">Gallery / Галерея</text>
+</svg>

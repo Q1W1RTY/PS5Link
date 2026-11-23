@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="159" height="38" viewBox="0 0 159 38" role="img" aria-label="Build / Сборка">
+  <title>Build / Сборка</title>
+  <rect x=".5" y=".5" width="158" height="37" rx="18.5" fill="#22242c" stroke="#434b5c"/>
+  <g transform="translate(13 9)" fill="none" stroke="#e9f2ff" color="#e9f2ff" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><rect x="2.5" y="4" width="15" height="12" rx="2"/><path d="m6 8 2 2-2 2m4 0h4"/></g>
+  <text x="42" y="24" fill="#f4f7fc" font-family="Segoe UI, Arial, sans-serif" font-size="13" font-weight="600">Build / Сборка</text>
+</svg>
