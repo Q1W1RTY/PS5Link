@@ -47,6 +47,12 @@
       <Setter Property="Foreground" Value="White" />
       <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
+    <Style Selector="Button.update">
+      <Setter Property="Height" Value="25" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="Padding" Value="8,0" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
     <Style Selector="Button.preset">
       <Setter Property="Height" Value="31" />
       <Setter Property="CornerRadius" Value="15" />
@@ -296,8 +302,14 @@
                 ToolTip.Tip="{DynamicResource LangAdvancedSettingsTip}" Click="OpenAdvanced" />
         <Grid ColumnDefinitions="*,Auto" Margin="3,0">
           <TextBlock Classes="muted" Text="{DynamicResource LangOverlayHint}" TextWrapping="Wrap" />
-          <TextBlock Grid.Column="1" Classes="muted" Text="v1.10.1" VerticalAlignment="Center" />
+          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="7">
+            <TextBlock x:Name="VersionText" Classes="muted" VerticalAlignment="Center" />
+            <Button x:Name="UpdateButton" Classes="update" Content="{DynamicResource LangUpdate}"
+                    AutomationProperties.Name="{DynamicResource LangUpdateTip}"
+                    ToolTip.Tip="{DynamicResource LangUpdateTip}" Click="UpdateApplication" />
+          </StackPanel>
         </Grid>
+        <TextBlock x:Name="UpdateFeedback" Classes="muted" Margin="3,0" TextWrapping="Wrap" IsVisible="False" />
       </StackPanel>
     </ScrollViewer>
   </Border>

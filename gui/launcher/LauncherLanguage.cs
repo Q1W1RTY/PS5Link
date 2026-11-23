@@ -6,6 +6,8 @@ internal static class LauncherLanguage
     [
         ("LangGradientTheme", "Градиентная тема", "Gradient theme"),
         ("LangConnect", "Подключиться", "Connect"),
+        ("LangUpdate", "Обновить", "Update"),
+        ("LangUpdateTip", "Обновить PS5Link", "Update PS5Link"),
         ("LangAdvancedSettings", "Дополнительно", "Advanced settings"),
         ("LangAdvancedSettingsTip", "Настройки клиента и подключение консоли", "Client settings and console setup"),
         ("LangVideoCategory", "Видео", "Video"),

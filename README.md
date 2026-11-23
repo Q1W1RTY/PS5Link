@@ -45,6 +45,10 @@ require separate compatible modules. The **Without RTX** preset works with
 the bundled components. The **RU / EN** button changes the launcher language
 immediately and the client language on its next launch.
 
+In the installed launcher, click **Update** next to the version number to
+check GitHub Releases. PS5Link verifies the download, installs the update
+in the current app folder and reopens the launcher.
+
 ## Русский
 
 PS5Link передаёт изображение и звук с PS5 или PS4 на компьютер Windows.
@@ -80,6 +84,10 @@ PS5Link передаёт изображение и звук с PS5 или PS4 н
 AMD FSR 3.1 нужны отдельные совместимые модули. Пресет **«Без RTX»**
 работает с библиотеками из установщика. Кнопка **RU / EN** меняет язык
 лаунчера сразу, а язык клиента при следующем запуске.
+
+В установленном лаунчере нажмите **«Обновить»** рядом с номером версии.
+PS5Link проверит релизы GitHub, проверит скачанный установщик, обновит
+приложение в той же папке и снова откроет лаунчер.
 
 ## Screenshots / Скриншоты
 

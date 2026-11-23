@@ -50,4 +50,40 @@ Name: "{group}\PS5Link"; Filename: "{app}\PS5LinkLauncher.exe"; WorkingDir: "{ap
 Name: "{autodesktop}\PS5Link"; Filename: "{app}\PS5LinkLauncher.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
+Filename: "{app}\PS5LinkLauncher.exe"; WorkingDir: "{app}"; Flags: nowait; Check: IsAutomaticUpdate
 Filename: "{app}\PS5LinkLauncher.exe"; Description: "{cm:LaunchProgram,PS5Link}"; Flags: nowait postinstall skipifsilent unchecked
+
+[Code]
+function OpenProcess(Access: Cardinal; InheritHandle: Boolean; ProcessId: Cardinal): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function WaitForSingleObject(Handle: THandle; Milliseconds: Cardinal): Cardinal;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function CloseHandle(Handle: THandle): Boolean;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+function UpdateProcessId: Integer;
+begin
+  Result := StrToIntDef(ExpandConstant('{param:PS5LINKUPDATEPID|0}'), 0);
+end;
+
+function IsAutomaticUpdate: Boolean;
+begin
+  Result := UpdateProcessId > 0;
+end;
+
+function InitializeSetup: Boolean;
+var
+  Launcher: THandle;
+begin
+  Result := True;
+  if not IsAutomaticUpdate then
+    Exit;
+
+  { Wait for the launcher to save its settings and release the executable. }
+  Launcher := OpenProcess($00100000, False, UpdateProcessId);
+  if Launcher <> 0 then
+  begin
+    Result := WaitForSingleObject(Launcher, 15000) = 0;
+    CloseHandle(Launcher);
+  end;
+end;

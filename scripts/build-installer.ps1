@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.10.1',
+    [string]$Version = '1.10.2',
     [string]$MsysRoot = 'C:\msys64',
     [string]$Iscc
 )

@@ -38,6 +38,9 @@ internal sealed partial class MainWindow : Window
         bool GradientTheme = false);
 
     private bool busy;
+    private bool updating;
+    private readonly CancellationTokenSource windowLifetime = new();
+    private (string Russian, string English) updateFeedback;
     private bool syncing;
     private bool russian;
     private (string Russian, string English) status = ("Готово к запуску", "Ready");
@@ -50,6 +53,7 @@ internal sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        VersionText.Text = $"v{ReleaseUpdate.CurrentVersion}";
         russian = LauncherLanguage.LoadRussian();
         LoadState();
         ApplyLanguage();
@@ -198,6 +202,8 @@ internal sealed partial class MainWindow : Window
         LanguageButton.Content = russian ? "RU" : "EN";
         StatusText.Text = Localize(status.Russian, status.English);
         ToolTip.SetTip(StatusText, StatusText.Text);
+        if (UpdateFeedback.IsVisible)
+            UpdateFeedback.Text = Localize(updateFeedback.Russian, updateFeedback.English);
     }
 
     private void ToggleLanguage(object? sender, RoutedEventArgs e)
@@ -217,6 +223,7 @@ internal sealed partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        windowLifetime.Cancel();
         SaveState();
         base.OnClosed(e);
     }
@@ -264,8 +271,8 @@ internal sealed partial class MainWindow : Window
             if (!useDlss && Target.SelectedIndex == 1)
                 Target.SelectedIndex = 0;
 
-            Start.IsEnabled = Dx12.IsEnabled = Upscale.IsEnabled = !busy;
-            Advanced.IsEnabled = !busy;
+            Start.IsEnabled = Advanced.IsEnabled = UpdateButton.IsEnabled = !busy && !updating;
+            Dx12.IsEnabled = Upscale.IsEnabled = !busy;
             RtxPreset.IsEnabled = StandardPreset.IsEnabled = !busy;
             Timing.IsEnabled = !busy && dx12;
             Generator.IsEnabled = !busy && dx12 && !useDlss;
@@ -333,7 +340,7 @@ internal sealed partial class MainWindow : Window
 
     private async Task RunClientAsync(bool advancedSettings)
     {
-        if (busy)
+        if (busy || updating)
             return;
 
         SaveState();
@@ -383,6 +390,76 @@ internal sealed partial class MainWindow : Window
             busy = false;
             Refresh();
         }
+    }
+
+    private async void UpdateApplication(object? sender, RoutedEventArgs e)
+    {
+        if (busy || updating)
+            return;
+
+        updating = true;
+        Refresh();
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(windowLifetime.Token);
+        deadline.CancelAfter(TimeSpan.FromMinutes(6));
+        try
+        {
+            string? directory = ReleaseUpdate.GetInstallDirectory();
+            if (directory is null)
+            {
+                ShowUpdateFeedback("Обновление доступно в версии, установленной через Setup.",
+                    "Updates are available from the copy installed by Setup.");
+                return;
+            }
+            if (ReleaseUpdate.OtherInstanceIsRunning(directory))
+            {
+                ShowUpdateFeedback("Закрой другие окна PS5Link и попробуй снова.",
+                    "Close other PS5Link windows and try again.");
+                return;
+            }
+
+            ShowUpdateFeedback("Проверяем релизы GitHub…", "Checking GitHub releases…");
+            var release = await ReleaseUpdate.CheckAsync(deadline.Token);
+            if (release is null)
+            {
+                ShowUpdateFeedback("Установлена последняя версия.", "You have the latest version.");
+                return;
+            }
+
+            ShowUpdateFeedback($"Скачиваем версию {release.Version}…", $"Downloading version {release.Version}…");
+            string installer = await ReleaseUpdate.DownloadAsync(release, deadline.Token);
+            deadline.Token.ThrowIfCancellationRequested();
+            if (ReleaseUpdate.OtherInstanceIsRunning(directory))
+            {
+                ShowUpdateFeedback("Закрой другие окна PS5Link и попробуй снова.",
+                    "Close other PS5Link windows and try again.");
+                return;
+            }
+
+            ReleaseUpdate.StartInstaller(installer, directory, russian);
+            Close();
+        }
+        catch (OperationCanceledException) when (windowLifetime.IsCancellationRequested) { }
+        catch (Exception error) when (error is HttpRequestException or IOException or InvalidDataException or
+            JsonException or FormatException or InvalidOperationException or ArgumentException or
+            UnauthorizedAccessException or Win32Exception or OperationCanceledException or KeyNotFoundException)
+        {
+            System.Diagnostics.Trace.WriteLine($"PS5Link update: {error.Message}");
+            ShowUpdateFeedback("Не удалось скачать или установить обновление.",
+                "Could not download or start the update.");
+        }
+        finally
+        {
+            updating = false;
+            if (!windowLifetime.IsCancellationRequested)
+                Refresh();
+        }
+    }
+
+    private void ShowUpdateFeedback(string ru, string en)
+    {
+        updateFeedback = (ru, en);
+        UpdateFeedback.Text = Localize(ru, en);
+        UpdateFeedback.IsVisible = true;
     }
 
     private void SetStatus(string ru, string en, uint rgb)
