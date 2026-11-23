@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="docs/ps5link/brand/hero.webp" width="100%" alt="PS5Link Remote Play: stream from a PS5 at home to a Windows laptop away from home">
+  <img src="docs/ps5link/brand/hero-gta.webp" width="100%" alt="PS5Link Remote Play: stream from a PS5 at home to a Windows laptop away from home">
 </h1>
 
 <p align="center"><strong>PlayStation Remote Play for Windows · Удалённая игра на PlayStation с Windows</strong></p>
