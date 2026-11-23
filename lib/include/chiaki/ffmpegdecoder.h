@@ -26,6 +26,7 @@ struct chiaki_ffmpeg_frame_t
 	double pts;
 	double duration;
 	bool recovered;
+	unsigned decoded_count;
 };
 
 struct chiaki_ffmpeg_decoder_t

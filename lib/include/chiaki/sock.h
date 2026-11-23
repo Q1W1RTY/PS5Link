@@ -4,6 +4,7 @@
 #define CHIAKI_SOCK_H
 
 #include "common.h"
+#include "log.h"
 
 #include <stdbool.h>
 
@@ -35,6 +36,8 @@ typedef int chiaki_socket_t;
 #endif
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_socket_set_nonblock(chiaki_socket_t sock, bool nonblock);
+CHIAKI_EXPORT void chiaki_socket_bypass_tun(chiaki_socket_t sock, int family, ChiakiLog *log);
+CHIAKI_EXPORT void chiaki_socket_apply_qos(chiaki_socket_t sock, ChiakiLog *log);
 
 #ifdef __cplusplus
 }

@@ -1,2 +1,12 @@
 /test/*.inl linguist-generated=true
 /lib/*.h linguist-language=C
+*.c text eol=lf
+*.h text eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.qml text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.sh text eol=lf

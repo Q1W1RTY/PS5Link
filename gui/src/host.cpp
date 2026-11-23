@@ -1,3 +1,4 @@
+#include <ps5link.h>
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
 #include <host.h>
@@ -50,14 +51,14 @@ void RegisteredHost::SaveToSettings(QSettings *settings) const
 	settings->setValue("target", (int)target);
 	settings->setValue("ap_ssid", ap_ssid);
 	settings->setValue("ap_bssid", ap_bssid);
-	settings->setValue("ap_key", ap_key);
+	Ps5LinkSetSecret(*settings, "ap_key", ap_key);
 	settings->setValue("ap_name", ap_name);
 	settings->setValue("server_nickname", server_nickname);
 	settings->setValue("server_mac", QByteArray((const char *)server_mac.GetMAC(), 6));
-	settings->setValue("rp_regist_key", QByteArray(rp_regist_key, sizeof(rp_regist_key)));
+	Ps5LinkSetSecret(*settings, "rp_regist_key", QByteArray(rp_regist_key, sizeof(rp_regist_key)));
 	settings->setValue("rp_key_type", rp_key_type);
-	settings->setValue("rp_key", QByteArray((const char *)rp_key, sizeof(rp_key)));
-	settings->setValue("console_pin", console_pin);
+	Ps5LinkSetSecret(*settings, "rp_key", QByteArray((const char *)rp_key, sizeof(rp_key)));
+	Ps5LinkSetSecret(*settings, "console_pin", console_pin);
 }
 
 RegisteredHost RegisteredHost::LoadFromSettings(QSettings *settings)
@@ -66,20 +67,20 @@ RegisteredHost RegisteredHost::LoadFromSettings(QSettings *settings)
 	r.target = (ChiakiTarget)settings->value("target").toInt();
 	r.ap_ssid = settings->value("ap_ssid").toString();
 	r.ap_bssid = settings->value("ap_bssid").toString();
-	r.ap_key = settings->value("ap_key").toString();
+	r.ap_key = Ps5LinkGetSecret(*settings, "ap_key", QMetaType::fromType<QString>()).toString();
 	r.ap_name = settings->value("ap_name").toString();
 	r.server_nickname = settings->value("server_nickname").toString();
 	auto server_mac = settings->value("server_mac").toByteArray();
 	if(server_mac.size() == 6)
 		r.server_mac = HostMAC((const uint8_t *)server_mac.constData());
-	auto rp_regist_key = settings->value("rp_regist_key").toByteArray();
+	auto rp_regist_key = Ps5LinkGetSecret(*settings, "rp_regist_key", QMetaType::fromType<QByteArray>()).toByteArray();
 	if(rp_regist_key.size() == sizeof(r.rp_regist_key))
 		memcpy(r.rp_regist_key, rp_regist_key.constData(), sizeof(r.rp_regist_key));
 	r.rp_key_type = settings->value("rp_key_type").toUInt();
-	auto rp_key = settings->value("rp_key").toByteArray();
+	auto rp_key = Ps5LinkGetSecret(*settings, "rp_key", QMetaType::fromType<QByteArray>()).toByteArray();
 	if(rp_key.size() == sizeof(r.rp_key))
 		memcpy(r.rp_key, rp_key.constData(), sizeof(r.rp_key));
-	r.console_pin = settings->value("console_pin").toString();
+	r.console_pin = Ps5LinkGetSecret(*settings, "console_pin", QMetaType::fromType<QString>()).toString();
 	return r;
 }
 

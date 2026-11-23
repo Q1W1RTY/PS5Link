@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
 #include <streamsession.h>
+#include <ps5link.h>
 #include <settings.h>
 #include <controllermanager.h>
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+#include <ds5bt.h>
+#endif
 
 #include <chiaki/base64.h>
 #include <chiaki/streamconnection.h>
@@ -281,7 +285,11 @@ StreamSessionConnectInfo::StreamSessionConnectInfo(
 	audio_out_device = settings->GetAudioOutDevice();
 	audio_in_device = settings->GetAudioInDevice();
 	log_level_mask = settings->GetLogLevelMask();
+#ifdef PS5LINK_BUILD
+    log_sanitize = true;
+#else
 	log_sanitize = settings->GetLogSanitize();
+#endif
 	audio_volume = settings->GetAudioVolume();
 	log_file = CreateLogFilename();
 	// local connection
@@ -306,6 +314,11 @@ StreamSessionConnectInfo::StreamSessionConnectInfo(
 	this->enable_keyboard = false;
 	this->enable_dualsense = true;
 	this->enable_idr_on_fec_failure = settings->GetIDROnFECFailureEnabled();
+#ifdef PS5LINK_BUILD
+    const auto recovery_override = QCoreApplication::instance()->property("ps5linkIdrRecovery");
+    if(recovery_override.isValid())
+        this->enable_idr_on_fec_failure = recovery_override.toBool();
+#endif
 	this->rumble_haptics_intensity = settings->GetRumbleHapticsIntensity();
 	this->buttons_by_pos = settings->GetButtonsByPosition();
 	this->start_mic_unmuted = settings->GetStartMicUnmuted();
@@ -473,6 +486,10 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	chiaki_connect_info.video_profile_auto_downgrade = true;
 	chiaki_connect_info.enable_keyboard = false;
 	chiaki_connect_info.enable_idr_on_fec_failure = connect_info.enable_idr_on_fec_failure;
+#ifdef PS5LINK_BUILD
+    chiaki_connect_info.video_reorder_window_ms = QCoreApplication::instance()->property("ps5linkReorderWindow").toUInt();
+    chiaki_connect_info.always_request_idr_on_loss = connect_info.settings ? connect_info.settings->GetAlwaysRequestIdr() : false;
+#endif
 	chiaki_connect_info.enable_dualsense = connect_info.enable_dualsense;
 	chiaki_connect_info.packet_loss_max = connect_info.packet_loss_max;
 	chiaki_connect_info.auto_regist = connect_info.auto_regist;
@@ -696,23 +713,103 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 			average_packet_loss = packet_loss;
 			emit AveragePacketLossChanged();
 		}
-		if(session.stream_connection.video_receiver)
+        auto &connection = session.stream_connection;
+        // Non-blocking lock: Takion holds state_mutex while invoking BlockingQueuedConnection
+        // InitAudio on the GUI thread during STREAMINFO; blocking here would deadlock.
+        if(chiaki_mutex_trylock(&connection.state_mutex) != CHIAKI_ERR_SUCCESS)
+            return;
+        auto *receiver = connection.video_receiver;
+        const auto total = receiver ? chiaki_video_receiver_get_frames_lost_total(receiver) : 0;
+#ifdef PS5LINK_BUILD
+        const auto stats = receiver ? chiaki_video_receiver_get_recovery_stats(receiver) : ChiakiVideoRecoveryStats{};
+        uint64_t live_rtt_us = receiver ? chiaki_takion_send_buffer_get_rtt_us(&connection.takion.send_buffer) : 0;
+        if(!live_rtt_us)
+            live_rtt_us = session.rtt_us;
+        rtt_ms = live_rtt_us / 1000.0;
+#endif
+        chiaki_mutex_unlock(&connection.state_mutex);
+		if(receiver)
 		{
-			int32_t total = chiaki_video_receiver_get_frames_lost_total(session.stream_connection.video_receiver);
 			if(total > pending_frames_lost)
 			{
 				frames_lost += total - pending_frames_lost;
 				emit FramesLostChanged();
 			}
 			pending_frames_lost = total;
+#ifdef PS5LINK_BUILD
+            const quint64 now = chiaki_time_now_monotonic_ms();
+            const quint64 elapsed = now - bitrate_window_start_ms;
+            if(!bitrate_window_start_ms || elapsed >= 1000)
+            {
+                if(bitrate_window_start_ms)
+                {
+                    const auto bytes = stats.assembled_video_bytes - bitrate_window_start_bytes;
+                    measured_bitrate = 0.008 * static_cast<double>(bytes) / static_cast<double>(elapsed);
+                    emit MeasuredBitrateChanged();
+                }
+                bitrate_window_start_ms = now;
+                bitrate_window_start_bytes = stats.assembled_video_bytes;
+            }
+            QString recovery = tr("waiting for a loss");
+            if(stats.loss_started_ms)
+                recovery = tr("waiting %1 ms").arg(now - stats.loss_started_ms);
+            else if(stats.has_recovered)
+                recovery = tr("%1 ms").arg(stats.last_recovery_ms);
+            const auto summary = tr("FEC %1 | reordered %2 | IDR %3 | held %4\nDecoder damaged %5 | recovery at decoder input %6\nRTT %7 ms | Requested startup bitrate %8 Mbps")
+                .arg(stats.fec_recovered_frames).arg(stats.reordered_frames).arg(stats.idr_requests)
+                .arg(stats.frames_held_for_keyframe).arg(decoder_corrupt_frames.loadRelaxed()).arg(recovery)
+                .arg(rtt_ms, 0, 'f', 1)
+                .arg(session.connect_info.video_profile.bitrate / 1000.0, 0, 'f', 1);
+            if(summary != recovery_stats)
+            {
+                recovery_stats = summary;
+                emit RecoveryStatsChanged();
+            }
+#endif
 		}
 	});
 
 	StartAudioOutDrainThread();
+	Ps5LinkBoostOptions boostOpts;
+#ifdef PS5LINK_BUILD
+	if(connect_info.settings)
+	{
+		boostOpts.wifiMediaMode = connect_info.settings->GetWifiStreamingMode();
+		boostOpts.preventSleep = connect_info.settings->GetPreventDisplaySleep();
+		boostOpts.turboMode = connect_info.settings->GetPerformanceMode() != 0;
+		enable_rumble.storeRelaxed(connect_info.settings->GetEnableRumble());
+		enable_adaptive_triggers.storeRelaxed(connect_info.settings->GetEnableAdaptiveTriggers());
+		enable_gyro_reset.storeRelaxed(connect_info.settings->GetEnableGyroReset());
+		lightbar_mode.storeRelaxed(connect_info.settings->GetLightbarMode());
+		ControllerManager::GetInstance()->SetPollingIntervalMs(connect_info.settings->GetControllerPollingMs());
+#ifdef _WIN32
+		Ds5BtManager::instance().setSpeakerAudioEnabled(connect_info.settings->GetBtSpeakerAudio());
+#endif
+	}
+#endif
+	Ps5LinkBeginStreamBoost(boostOpts);
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	Ds5BtManager::instance().setMicAudioCallback([this](const int16_t *mono48k, const int16_t *stereo48k, size_t frames) {
+		if(!mic_active.loadRelaxed() || muted || audio_in != 0)
+			return;
+#if CHIAKI_GUI_ENABLE_SPEEX
+		if(speech_processing_enabled)
+			QueueMicData(reinterpret_cast<const uint8_t *>(mono48k), frames * sizeof(int16_t));
+		else
+#endif
+			QueueMicData(reinterpret_cast<const uint8_t *>(stereo48k), frames * 2 * sizeof(int16_t));
+	});
+	Ds5BtManager::instance().setMicState(false, muted);
+#endif
 }
 
 StreamSession::~StreamSession()
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	Ds5BtManager::instance().setMicAudioCallback(nullptr);
+	Ds5BtManager::instance().setMicState(false, true);
+#endif
+	Ps5LinkEndStreamBoost();
 	mic_active.storeRelaxed(false);
 	StopAudioOutDrainThread();
 	if(audio_out)
@@ -833,6 +930,9 @@ void StreamSession::Start()
 void StreamSession::Stop()
 {
 	mic_active.storeRelaxed(false);
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	Ds5BtManager::instance().setMicState(false, true);
+#endif
 	chiaki_session_stop(&session);
 }
 
@@ -865,19 +965,28 @@ void StreamSession::ToggleMute()
 #else
 		InitMic(2, opus_encoder.audio_header.rate);
 #endif
-			if(!audio_in)
-			{
-				CHIAKI_LOGE(GetChiakiLog(), "Microphone initialization failed, leaving microphone muted");
-				return;
-			}
-			chiaki_session_connect_microphone(&session);
-			mic_connected = true;
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+		const bool has_bt_mic = Ds5BtManager::instance().isConnected() && mic_buf.buf != nullptr;
+		if(!audio_in && !has_bt_mic)
+#else
+		if(!audio_in)
+#endif
+		{
+			CHIAKI_LOGE(GetChiakiLog(), "Microphone initialization failed, leaving microphone muted");
+			return;
 		}
+		chiaki_session_connect_microphone(&session);
+		mic_connected = true;
+	}
 	chiaki_session_toggle_microphone(&session, muted);
 	if (muted)
 		muted = false;
 	else
 		muted = true;
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(Ds5BtManager::instance().isConnected())
+		Ds5BtManager::instance().setMicState(!muted && mic_connected, muted);
+#endif
 	QMetaObject::invokeMethod(this, [this]() {
 		for(auto controller : controllers)
 			controller->SetDualsenseMic(muted);
@@ -944,6 +1053,100 @@ void StreamSession::HandleMouseMoveEvent(QMouseEvent *event, qreal width, qreal 
 	}
 	SendFeedbackState();
 }
+
+void StreamSession::HandleNormalizedTouchpad(int action, float normX, float normY, bool clickButton)
+{
+	if(!mouse_touch_enabled)
+		return;
+	const uint16_t psx = static_cast<uint16_t>(std::clamp(normX, 0.0f, 1.0f) * PS_TOUCHPAD_MAX_X);
+	const uint16_t psy = static_cast<uint16_t>(std::clamp(normY, 0.0f, 1.0f) * PS_TOUCHPAD_MAX_Y);
+	if(action == 1) // press
+	{
+		if(clickButton)
+			keyboard_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+		else if(mouse_touch_id < 0)
+			mouse_touch_id = chiaki_controller_state_start_touch(&keyboard_state, psx, psy);
+	}
+	else if(action == 0) // release
+	{
+		if(mouse_touch_id >= 0)
+		{
+			chiaki_controller_state_stop_touch(&keyboard_state, static_cast<uint8_t>(mouse_touch_id));
+			mouse_touch_id = -1;
+		}
+		keyboard_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+	}
+	else if(action < 0) // move while left button held
+	{
+		if(clickButton)
+			return;
+		if(mouse_touch_id >= 0)
+			chiaki_controller_state_set_touch_pos(&keyboard_state, static_cast<uint8_t>(mouse_touch_id), psx, psy);
+		else
+			mouse_touch_id = chiaki_controller_state_start_touch(&keyboard_state, psx, psy);
+	}
+	SendFeedbackState();
+}
+
+void StreamSession::SetKeyboardControllerEnabled(bool enabled)
+{
+	if(keyboard_controller_enabled == enabled)
+		return;
+	keyboard_controller_enabled = enabled;
+	if(!enabled)
+	{
+		if(mouse_touch_id >= 0)
+		{
+			chiaki_controller_state_stop_touch(&keyboard_state, static_cast<uint8_t>(mouse_touch_id));
+			mouse_touch_id = -1;
+		}
+		chiaki_controller_state_set_idle(&keyboard_state);
+		SendFeedbackState();
+	}
+}
+
+#ifdef PS5LINK_BUILD
+void StreamSession::SyncLiveSettings(bool rumble, bool adaptiveTriggers, bool gyroReset, int lightbarMode)
+{
+	const bool prevRumble = enable_rumble.fetchAndStoreRelaxed(rumble);
+	const bool prevTriggers = enable_adaptive_triggers.fetchAndStoreRelaxed(adaptiveTriggers);
+	enable_gyro_reset.storeRelaxed(gyroReset);
+	const int clampedLightbar = qBound(0, lightbarMode, 3);
+	const int prevLightbar = lightbar_mode.fetchAndStoreRelaxed(clampedLightbar);
+
+	if(prevRumble && !rumble)
+	{
+		for(auto controller : controllers)
+			controller->SetRumble(0, 0);
+		if(haptics_output > 0)
+			SDL_ClearQueuedAudio(haptics_output);
+	}
+	if(prevTriggers && !adaptiveTriggers)
+	{
+		const uint8_t clear_effect[10] = { 0 };
+		for(auto controller : controllers)
+			controller->SetTriggerEffects(0x05, clear_effect, 0x05, clear_effect);
+	}
+	if(prevLightbar != clampedLightbar)
+	{
+		const bool showOnController = (clampedLightbar == 1 || clampedLightbar == 3);
+		const quint32 rgb = lightbar_rgb.loadRelaxed();
+		uint8_t color[3] = {
+			showOnController ? static_cast<uint8_t>((rgb >> 16) & 0xffu) : uint8_t(0),
+			showOnController ? static_cast<uint8_t>((rgb >> 8) & 0xffu) : uint8_t(0),
+			showOnController ? static_cast<uint8_t>(rgb & 0xffu) : uint8_t(0)
+		};
+		for(auto controller : controllers)
+			controller->ChangeLEDColor(color);
+	}
+}
+
+void StreamSession::ResetGyro()
+{
+	for(auto controller : controllers)
+		controller->resetMotionControls();
+}
+#endif
 
 void StreamSession::HandleKeyboardEvent(QKeyEvent *event)
 {
@@ -1317,6 +1520,12 @@ void StreamSession::DpadSendFeedbackState()
 			dpad_touch_stop_timer->start(NEW_DPAD_TOUCH_INTERVAL_MS);
 	}
 	chiaki_controller_state_or(&state, &state, &dpad_touch_state);
+#ifdef PS5LINK_BUILD
+	constexpr uint32_t quit_combo = CHIAKI_CONTROLLER_BUTTON_OPTIONS | CHIAKI_CONTROLLER_BUTTON_SHARE;
+	if(QCoreApplication::instance()->property("ps5linkGamepadQuitHotkey").toBool()
+		&& (state.buttons & quit_combo) == quit_combo)
+		state.buttons &= ~quit_combo;
+#endif
 	chiaki_session_set_controller_state(&session, &state);
 }
 
@@ -1373,6 +1582,12 @@ void StreamSession::SendFeedbackState()
 			dpad_touch_stop_timer->start(NEW_DPAD_TOUCH_INTERVAL_MS);
 	}
 	chiaki_controller_state_or(&state, &state, &dpad_touch_state);
+#ifdef PS5LINK_BUILD
+	constexpr uint32_t quit_combo = CHIAKI_CONTROLLER_BUTTON_OPTIONS | CHIAKI_CONTROLLER_BUTTON_SHARE;
+	if(QCoreApplication::instance()->property("ps5linkGamepadQuitHotkey").toBool()
+		&& (state.buttons & quit_combo) == quit_combo)
+		state.buttons &= ~quit_combo;
+#endif
 	chiaki_session_set_controller_state(&session, &state);
 }
 
@@ -1550,11 +1765,28 @@ void StreamSession::InitMic(unsigned int channels, unsigned int rate)
 	};
 	spec.userdata = this;
 
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(Ds5BtManager::instance().isConnected()
+		&& (audio_in_device_name.isEmpty() || audio_in_device_name == "Auto"))
+	{
+		audio_in = 0;
+		CHIAKI_LOGI(log.GetChiakiLog(), "Using Bluetooth DualSense microphone (%u channels @ %u Hz)", channels, rate);
+		return;
+	}
+#endif
+
 	SDL_AudioSpec obtained;
 	audio_in = SDL_OpenAudioDevice(audio_in_device_name.isEmpty() ? nullptr : qUtf8Printable(audio_in_device_name), true, &spec, &obtained, false);
 	if(!audio_in)
 	{
 		CHIAKI_LOGE(log.GetChiakiLog(), "Failed to open Microphone '%s': %s", qPrintable(audio_in_device_name), SDL_GetError());
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+		if(Ds5BtManager::instance().isConnected())
+		{
+			CHIAKI_LOGI(log.GetChiakiLog(), "Falling back to Bluetooth DualSense microphone (%u channels @ %u Hz)", channels, rate);
+			return;
+		}
+#endif
 		if(audio_in_device_name.isEmpty())
 		{
 			clear_mic_buffers();
@@ -1902,6 +2134,13 @@ void StreamSession::ConnectHaptics()
 		});
 		return;
 	}
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(Ds5BtManager::instance().isConnected())
+	{
+		CHIAKI_LOGI(log.GetChiakiLog(), "Using native Bluetooth 3000 Hz DualSense haptics engine.");
+		return;
+	}
+#endif
 	CHIAKI_LOGW(log.GetChiakiLog(), "DualSense features were enabled and a DualSense is connected, but could not find the DualSense audio device!");
 	return;
 }
@@ -1958,6 +2197,12 @@ void StreamSession::StopSdeckHaptics()
 
 void StreamSession::PushAudioFrame(int16_t *og_buf, size_t samples_count)
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(audio_volume > 0 && Ds5BtManager::instance().isSpeakerAudioActive())
+	{
+		Ds5BtManager::instance().pushSpeakerAudio48kHz(og_buf, samples_count, audio_volume, SDL_MIX_MAXVOLUME);
+	}
+#endif
 	if(!audio_out || !audio_volume)
 		return;
 
@@ -2199,6 +2444,10 @@ void StreamSession::SetMicAuthorization(Authorization authorization)
 
 void StreamSession::PushHapticsFrame(uint8_t *buf, size_t buf_size)
 {
+#ifdef PS5LINK_BUILD
+	if(!enable_rumble.loadRelaxed())
+		return;
+#endif
 	if(buf_size == 0)
 	{
 		CHIAKI_LOGW(log.GetChiakiLog(), "Received empty haptics frame");
@@ -2210,6 +2459,22 @@ void StreamSession::PushHapticsFrame(uint8_t *buf, size_t buf_size)
 		CHIAKI_LOGE(log.GetChiakiLog(), "Haptics audio has invalid size: %zu", buf_size);
 		return;
 	}
+
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(Ds5BtManager::instance().isConnected())
+	{
+		if(ps5_rumble_intensity >= 0 && haptic_override >= 0.01f)
+		{
+			const float gain = haptic_override * rumble_multiplier;
+			Ds5BtManager::instance().pushHaptics3kHz(
+				reinterpret_cast<const int16_t *>(buf),
+				buf_size / (2 * sizeof(int16_t)),
+				gain);
+		}
+		if(haptics_output == 0)
+			return;
+	}
+#endif
 
 #if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
 	if(sdeck && haptics_handheld > 0 && enable_steamdeck_haptics)
@@ -2416,6 +2681,10 @@ void StreamSession::Event(ChiakiEvent *event)
 				return;
 			uint8_t left = event->rumble.left;
 			uint8_t right = event->rumble.right;
+#ifdef PS5LINK_BUILD
+			if(!enable_rumble.loadRelaxed())
+				break;
+#endif
 			uint8_t left_adj = left * rumble_multiplier;
 			uint8_t right_adj = right * rumble_multiplier;
 			QMetaObject::invokeMethod(this, [this, left, right, left_adj, right_adj]() {
@@ -2437,6 +2706,12 @@ void StreamSession::Event(ChiakiEvent *event)
 		}
 		case CHIAKI_EVENT_LED_COLOR: {
 			memcpy(led_color, event->led_state, 3);
+#ifdef PS5LINK_BUILD
+			lightbar_rgb.storeRelaxed((quint32(led_color[0]) << 16) | (quint32(led_color[1]) << 8) | quint32(led_color[2]));
+			const int current_lightbar_mode = lightbar_mode.loadRelaxed();
+			if(current_lightbar_mode != 1 && current_lightbar_mode != 3)
+				break;
+#endif
 			uint8_t led_state[3];
 			memcpy(led_state, led_color, 3);
 			QMetaObject::invokeMethod(this, [this, led_state]() {
@@ -2460,13 +2735,16 @@ void StreamSession::Event(ChiakiEvent *event)
 			}
 			else
 			{
-				CHIAKI_LOGW(log.GetChiakiLog(), "Video FEC failure, retrying IDR request after send failure");
-				RequestIDR();
+				CHIAKI_LOGW(log.GetChiakiLog(), "Video FEC failure, IDR request pending retry");
 			}
 			emit FecFailure();
 			break;
 		}
 		case CHIAKI_EVENT_MOTION_RESET: {
+#ifdef PS5LINK_BUILD
+			if(!enable_gyro_reset.loadRelaxed())
+				break;
+#endif
 			QMetaObject::invokeMethod(this, [this]() {
 				for(auto controller : controllers)
 					controller->resetMotionControls();
@@ -2547,6 +2825,10 @@ void StreamSession::Event(ChiakiEvent *event)
 			break;
 		}
 		case CHIAKI_EVENT_TRIGGER_EFFECTS: {
+#ifdef PS5LINK_BUILD
+			if(!enable_adaptive_triggers.loadRelaxed())
+				break;
+#endif
 			if(ps5_trigger_intensity < 0)
 				return;
 			uint8_t type_left = event->trigger_effects.type_left;
@@ -2808,11 +3090,13 @@ void StreamSession::CancelPsnConnection(bool stop_thread)
 void StreamSession::TriggerFfmpegFrameAvailable()
 {
 	emit FfmpegFrameAvailable();
+#ifndef PS5LINK_BUILD
 	if(measured_bitrate != session.stream_connection.measured_bitrate)
 	{
 		measured_bitrate = session.stream_connection.measured_bitrate;
 		emit MeasuredBitrateChanged();
 	}
+#endif
 }
 
 bool StreamSession::RequestIDR()

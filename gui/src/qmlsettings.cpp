@@ -1,7 +1,11 @@
 #include "qmlsettings.h"
 #include "sessionlog.h"
+#include "controllermanager.h"
 
 #include <QSet>
+#include <QDesktopServices>
+#include <QDir>
+#include <QUrl>
 #include <QKeySequence>
 #include <QFutureWatcher>
 #include <QtConcurrentRun>
@@ -63,6 +67,11 @@ QmlSettings::QmlSettings(Settings *settings, QObject *parent)
     if (settings->GetLogVerbose())
         QLoggingCategory::setFilterRules(QStringLiteral("chiaki.gui.debug=true"));
 
+#ifdef PS5LINK_BUILD
+    QCoreApplication::instance()->setProperty("ps5linkGamepadQuitHotkey", settings->GetGamepadQuitHotkey());
+    ControllerManager::GetInstance()->SetPollingIntervalMs(settings->GetControllerPollingMs());
+#endif
+
     connect(settings, &Settings::RegisteredHostsUpdated, this, &QmlSettings::registeredHostsChanged);
     connect(settings, &Settings::ProfilesUpdated, this, &QmlSettings::profilesChanged);
 }
@@ -104,6 +113,355 @@ bool QmlSettings::showStreamStats() const
 {
     return settings->GetShowStreamStats();
 }
+
+#ifdef PS5LINK_BUILD
+bool QmlSettings::dx12Enabled() const
+{
+    return settings->GetDx12Enabled();
+}
+
+void QmlSettings::setDx12Enabled(bool enabled)
+{
+    if(enabled == dx12Enabled())
+        return;
+    settings->SetDx12Enabled(enabled);
+    emit dx12EnabledChanged();
+}
+
+int QmlSettings::dx12FrameGeneration() const
+{
+    return settings->GetDx12FrameGeneration();
+}
+
+void QmlSettings::setDx12FrameGeneration(int mode)
+{
+    mode = qBound(0, mode, 3);
+    if(mode == dx12FrameGeneration())
+        return;
+    settings->SetDx12FrameGeneration(mode);
+    emit dx12FrameGenerationChanged();
+}
+
+int QmlSettings::dx12DlssSr() const
+{
+    return settings->GetDx12DlssSr();
+}
+
+void QmlSettings::setDx12DlssSr(int model)
+{
+    settings->SetDx12DlssSr(model);
+}
+
+int QmlSettings::dx12PresentMode() const
+{
+    return settings->GetDx12PresentMode();
+}
+
+void QmlSettings::setDx12PresentMode(int mode)
+{
+    settings->SetDx12PresentMode(mode);
+}
+
+int QmlSettings::dx12Aspect() const
+{
+    return settings->GetDx12Aspect();
+}
+
+void QmlSettings::setDx12Aspect(int aspect)
+{
+    settings->SetDx12Aspect(aspect);
+}
+
+int QmlSettings::dx12UpscaleHeight() const
+{
+    return settings->GetDx12UpscaleHeight();
+}
+
+void QmlSettings::setDx12UpscaleHeight(int height)
+{
+    settings->SetDx12UpscaleHeight(height);
+}
+
+int QmlSettings::dx12Sharpness() const
+{
+    return settings->GetDx12Sharpness();
+}
+
+void QmlSettings::setDx12Sharpness(int sharpness)
+{
+    settings->SetDx12Sharpness(sharpness);
+}
+
+bool QmlSettings::dx12Fsr() const
+{
+    return settings->GetDx12Fsr();
+}
+
+void QmlSettings::setDx12Fsr(bool enabled)
+{
+    settings->SetDx12Fsr(enabled);
+}
+
+int QmlSettings::dx12AmbientStyle() const { return settings->GetDx12AmbientStyle(); }
+void QmlSettings::setDx12AmbientStyle(int style)
+{
+    style = qBound(0, style, 2);
+    if(style == dx12AmbientStyle())
+        return;
+    settings->SetDx12AmbientStyle(style);
+    emit dx12AmbientStyleChanged();
+}
+
+bool QmlSettings::dx12ErrorConcealment() const { return settings->GetDx12ErrorConcealment(); }
+void QmlSettings::setDx12ErrorConcealment(bool enabled)
+{
+    if(enabled == dx12ErrorConcealment())
+        return;
+    settings->SetDx12ErrorConcealment(enabled);
+    emit dx12ErrorConcealmentChanged();
+}
+
+int QmlSettings::dx12WindowMode() const { return settings->GetDx12WindowMode(); }
+void QmlSettings::setDx12WindowMode(int mode)
+{
+    mode = qBound(0, mode, 2);
+    if(mode == dx12WindowMode())
+        return;
+    settings->SetDx12WindowMode(mode);
+    emit dx12WindowModeChanged();
+}
+
+int QmlSettings::dx12TouchpadWidth() const { return settings->GetDx12TouchpadWidth(); }
+void QmlSettings::setDx12TouchpadWidth(int percent)
+{
+    percent = qBound(25, percent, 100);
+    if(percent == dx12TouchpadWidth())
+        return;
+    settings->SetDx12TouchpadWidth(percent);
+    emit dx12TouchpadWidthChanged();
+}
+
+bool QmlSettings::wifiStreamingMode() const { return settings->GetWifiStreamingMode(); }
+void QmlSettings::setWifiStreamingMode(bool enabled)
+{
+    if(enabled == wifiStreamingMode())
+        return;
+    settings->SetWifiStreamingMode(enabled);
+    emit wifiStreamingModeChanged();
+}
+
+bool QmlSettings::preventDisplaySleep() const { return settings->GetPreventDisplaySleep(); }
+void QmlSettings::setPreventDisplaySleep(bool enabled)
+{
+    if(enabled == preventDisplaySleep())
+        return;
+    settings->SetPreventDisplaySleep(enabled);
+    emit preventDisplaySleepChanged();
+}
+
+int QmlSettings::performanceMode() const { return settings->GetPerformanceMode(); }
+void QmlSettings::setPerformanceMode(int mode)
+{
+    mode = qBound(0, mode, 1);
+    if(mode == performanceMode())
+        return;
+    settings->SetPerformanceMode(mode);
+    emit performanceModeChanged();
+}
+
+int QmlSettings::controllerPollingMs() const { return settings->GetControllerPollingMs(); }
+void QmlSettings::setControllerPollingMs(int ms)
+{
+    ms = (ms == 1 || ms == 2 || ms == 4 || ms == 8) ? ms : 4;
+    if(ms == controllerPollingMs())
+        return;
+    settings->SetControllerPollingMs(ms);
+    ControllerManager::GetInstance()->SetPollingIntervalMs(ms);
+    emit controllerPollingMsChanged();
+}
+
+bool QmlSettings::gamepadQuitHotkey() const { return settings->GetGamepadQuitHotkey(); }
+void QmlSettings::setGamepadQuitHotkey(bool enabled)
+{
+    if(enabled == gamepadQuitHotkey())
+        return;
+    settings->SetGamepadQuitHotkey(enabled);
+    QCoreApplication::instance()->setProperty("ps5linkGamepadQuitHotkey", enabled);
+    emit gamepadQuitHotkeyChanged();
+}
+
+bool QmlSettings::enableRumble() const { return settings->GetEnableRumble(); }
+void QmlSettings::setEnableRumble(bool enabled)
+{
+    if(enabled == enableRumble())
+        return;
+    settings->SetEnableRumble(enabled);
+    emit enableRumbleChanged();
+}
+
+bool QmlSettings::enableAdaptiveTriggers() const { return settings->GetEnableAdaptiveTriggers(); }
+void QmlSettings::setEnableAdaptiveTriggers(bool enabled)
+{
+    if(enabled == enableAdaptiveTriggers())
+        return;
+    settings->SetEnableAdaptiveTriggers(enabled);
+    emit enableAdaptiveTriggersChanged();
+}
+
+bool QmlSettings::enableGyroReset() const { return settings->GetEnableGyroReset(); }
+void QmlSettings::setEnableGyroReset(bool enabled)
+{
+    if(enabled == enableGyroReset())
+        return;
+    settings->SetEnableGyroReset(enabled);
+    emit enableGyroResetChanged();
+}
+
+int QmlSettings::lightbarMode() const { return settings->GetLightbarMode(); }
+void QmlSettings::setLightbarMode(int mode)
+{
+    mode = qBound(0, mode, 3);
+    if(mode == lightbarMode())
+        return;
+    settings->SetLightbarMode(mode);
+    emit lightbarModeChanged();
+}
+
+int QmlSettings::themeMode() const { return settings->GetThemeMode(); }
+void QmlSettings::setThemeMode(int mode)
+{
+    mode = qBound(0, mode, 2);
+    if(mode == themeMode())
+        return;
+    settings->SetThemeMode(mode);
+    emit themeModeChanged();
+}
+
+bool QmlSettings::volumeControlsSystem() const { return settings->GetVolumeControlsSystem(); }
+void QmlSettings::setVolumeControlsSystem(bool enabled)
+{
+    if(enabled == volumeControlsSystem())
+        return;
+    settings->SetVolumeControlsSystem(enabled);
+    emit volumeControlsSystemChanged();
+}
+
+bool QmlSettings::hideOnScreenControls() const { return settings->GetHideOnScreenControls(); }
+void QmlSettings::setHideOnScreenControls(bool hide)
+{
+    if(hide == hideOnScreenControls())
+        return;
+    settings->SetHideOnScreenControls(hide);
+    emit hideOnScreenControlsChanged();
+}
+
+bool QmlSettings::showMicButton() const { return settings->GetShowMicButton(); }
+void QmlSettings::setShowMicButton(bool show)
+{
+    if(show == showMicButton())
+        return;
+    settings->SetShowMicButton(show);
+    emit showMicButtonChanged();
+}
+
+bool QmlSettings::showAspectButton() const { return settings->GetShowAspectButton(); }
+void QmlSettings::setShowAspectButton(bool show)
+{
+    if(show == showAspectButton())
+        return;
+    settings->SetShowAspectButton(show);
+    emit showAspectButtonChanged();
+}
+
+bool QmlSettings::showVolumeButtons() const { return settings->GetShowVolumeButtons(); }
+void QmlSettings::setShowVolumeButtons(bool show)
+{
+    if(show == showVolumeButtons())
+        return;
+    settings->SetShowVolumeButtons(show);
+    emit showVolumeButtonsChanged();
+}
+
+bool QmlSettings::alwaysRequestIdr() const { return settings->GetAlwaysRequestIdr(); }
+void QmlSettings::setAlwaysRequestIdr(bool enabled)
+{
+    if(enabled == alwaysRequestIdr())
+        return;
+    settings->SetAlwaysRequestIdr(enabled);
+    emit alwaysRequestIdrChanged();
+}
+
+void QmlSettings::applyPxPlayKeyboardPreset()
+{
+    settings->ApplyPxPlayKeyboardPreset();
+    emit controllerMappingChanged();
+}
+
+void QmlSettings::resetVideoSettings()
+{
+    settings->ResetVideoSettings();
+    refreshAllKeys();
+}
+
+void QmlSettings::resetStreamSettings()
+{
+    settings->ResetStreamSettings();
+    ControllerManager::GetInstance()->SetPollingIntervalMs(settings->GetControllerPollingMs());
+    QCoreApplication::instance()->setProperty("ps5linkGamepadQuitHotkey", settings->GetGamepadQuitHotkey());
+    refreshAllKeys();
+}
+
+void QmlSettings::openDataFolder()
+{
+    const QString dir = settings->GetDataDirectory();
+    QDir().mkpath(dir);
+    QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+}
+
+void QmlSettings::openLogsFolder()
+{
+    const QString dir = GetLogBaseDir();
+    QDir().mkpath(dir);
+    QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+}
+
+void QmlSettings::openControllersFolder()
+{
+    const QString dir = settings->GetControllersDirectory();
+    QDir().mkpath(dir);
+    QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+}
+
+void QmlSettings::openShadersFolder()
+{
+    const QString dir = settings->GetShadersDirectory();
+    QDir().mkpath(dir);
+    const QString readmePath = QDir(dir).filePath(QStringLiteral("README.txt"));
+    if(!QFile::exists(readmePath))
+    {
+        QFile f(readmePath);
+        if(f.open(QIODevice::WriteOnly | QIODevice::Text))
+        {
+            f.write(
+                "PS5Link Custom DX12 Post-Processing Shader\n"
+                "==========================================\n"
+                "Place a custom HLSL Pixel Shader 5.0 file named 'postprocess.hlsl' in this folder.\n"
+                "Entry point: float4 postProcess(float4 position : SV_Position) : SV_Target\n"
+                "Bindings:\n"
+                "  Texture2D<float4> enhanced : register(t0);\n"
+                "  Texture2D<float4> baseline : register(t1);\n"
+                "  cbuffer PostParams : register(b0) {\n"
+                "      float sharpness; float splitX; float splitEnabled; float ditherEnabled;\n"
+                "      float contrast; float saturation; float gamma; float frameSeed;\n"
+                "      float debandEnabled; float ditherScale; float hdrPassthrough; float pad0;\n"
+                "  };\n"
+                "If postprocess.hlsl fails to compile, PS5Link falls back to the built-in CAS shader.\n"
+            );
+        }
+    }
+    QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+}
+#endif
 
 void QmlSettings::setShowStreamStats(bool enabled)
 {
@@ -1898,6 +2256,30 @@ void QmlSettings::refreshAllKeys()
     emit allowJoystickBackgroundEventsChanged();
     emit startMicUnmutedChanged();
     emit showStreamStatsChanged();
+#ifdef PS5LINK_BUILD
+    emit dx12EnabledChanged();
+    emit dx12FrameGenerationChanged();
+    emit dx12AmbientStyleChanged();
+    emit dx12ErrorConcealmentChanged();
+    emit dx12WindowModeChanged();
+    emit dx12TouchpadWidthChanged();
+    emit wifiStreamingModeChanged();
+    emit preventDisplaySleepChanged();
+    emit performanceModeChanged();
+    emit controllerPollingMsChanged();
+    emit gamepadQuitHotkeyChanged();
+    emit enableRumbleChanged();
+    emit enableAdaptiveTriggersChanged();
+    emit enableGyroResetChanged();
+    emit lightbarModeChanged();
+    emit themeModeChanged();
+    emit volumeControlsSystemChanged();
+    emit hideOnScreenControlsChanged();
+    emit showMicButtonChanged();
+    emit showAspectButtonChanged();
+    emit showVolumeButtonsChanged();
+    emit alwaysRequestIdrChanged();
+#endif
     emit streamerModeChanged();
 #ifdef CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
     emit verticalDeckChanged();

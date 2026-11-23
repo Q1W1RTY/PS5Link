@@ -1,9 +1,12 @@
+#include <ps5link.h>
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
 #include <settings.h>
 #include <SDL.h>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QStandardPaths>
 #include <QUrl>
 #include <QKeySequence>
 #include <QCoreApplication>
@@ -177,7 +180,7 @@ static void MigrateLegacyFrameMixerSetting(QSettings *settings, QSettings *place
 	apply_frame_mixer(*settings);
 	if (profiles) {
 		for (const QString &profile : *profiles) {
-			QSettings profile_settings(QCoreApplication::organizationName(),
+			QSettings profile_settings(QSettings::defaultFormat(), QSettings::UserScope, QCoreApplication::organizationName(),
 			                           QStringLiteral("%1-%2").arg(QCoreApplication::applicationName(), profile));
 			apply_frame_mixer(profile_settings);
 		}
@@ -264,9 +267,9 @@ static void MigrateControllerMappings(QSettings *settings)
 
 Settings::Settings(const QString &conf, QObject *parent) : QObject(parent),
 	time_format("yyyy-MM-dd HH:mm:ss t"),
-	settings(QCoreApplication::organizationName(), conf.isEmpty() ? QCoreApplication::applicationName() : QStringLiteral("%1-%2").arg(QCoreApplication::applicationName(), conf)),
-	default_settings(QCoreApplication::organizationName(), QCoreApplication::applicationName()),
-	placebo_settings(QCoreApplication::organizationName(), QStringLiteral("pl_render_params"))
+	settings(QSettings::defaultFormat(), QSettings::UserScope, QCoreApplication::organizationName(), conf.isEmpty() ? QCoreApplication::applicationName() : QStringLiteral("%1-%2").arg(QCoreApplication::applicationName(), conf)),
+	default_settings(QSettings::defaultFormat(), QSettings::UserScope, QCoreApplication::organizationName(), QCoreApplication::applicationName()),
+	placebo_settings(QSettings::defaultFormat(), QSettings::UserScope, QCoreApplication::organizationName(), QStringLiteral("pl_render_params"))
 {
 	settings.setFallbacksEnabled(false);
 	MigrateSettings(&settings);
@@ -294,7 +297,11 @@ void Settings::ExportSettings(QString filepath)
 	if(info.suffix().isEmpty())
 		filepath += ".ini";
 	QFile file(filepath);
-	file.open(QIODevice::ReadWrite);
+	if(!file.open(QIODevice::ReadWrite))
+	{
+		qWarning("Settings::ExportSettings: failed to open %s", qPrintable(filepath));
+		return;
+	}
 	file.close();
 	QSettings settings_backup(filepath, QSettings::IniFormat);
 	SaveRegisteredHosts(&settings_backup);
@@ -320,7 +327,11 @@ void Settings::ExportPlaceboSettings(QString filepath)
 		filepath += ".ini";
 	// create file if it doesn't exist
 	QFile file(filepath);
-	file.open(QIODevice::ReadWrite);
+	if(!file.open(QIODevice::ReadWrite))
+	{
+		qWarning("Settings::ExportPlaceboSettings: failed to open %s", qPrintable(filepath));
+		return;
+	}
 	file.close();
 	QSettings settings_backup(filepath, QSettings::IniFormat);
     QStringList keys = placebo_settings.allKeys();
@@ -347,40 +358,109 @@ QMap<QString, QString> Settings::GetPlaceboValues()
 void Settings::ImportSettings(QString filepath)
 {
 	QSettings settings_backup(filepath, QSettings::IniFormat);
-	LoadRegisteredHosts(&settings_backup);
-	LoadHiddenHosts(&settings_backup);
-	LoadManualHosts(&settings_backup);
-	LoadControllerMappings(&settings_backup);
+	const auto isSecretKey = [](const QString &key) {
+		if(key == QLatin1String("settings/psn_auth_token")
+			|| key == QLatin1String("settings/psn_refresh_token")
+			|| key == QLatin1String("settings/psn_account_id"))
+			return true;
+		if(key.startsWith(QLatin1String("registered_hosts/")))
+		{
+			return key.endsWith(QLatin1String("/rp_regist_key"))
+				|| key.endsWith(QLatin1String("/rp_key"))
+				|| key.endsWith(QLatin1String("/ap_key"))
+				|| key.endsWith(QLatin1String("/console_pin"));
+		}
+		return false;
+	};
+	const auto canImportKeys = [&]() {
+		const QStringList keys = settings_backup.allKeys();
+		if(keys.isEmpty())
+			return false;
+		int undecryptableSecrets = 0;
+		for(const QString &key : keys)
+		{
+			if(!isSecretKey(key))
+				continue;
+			const QVariant val = settings_backup.value(key);
+			if(val.toByteArray().isEmpty())
+				continue;
+			if(Ps5LinkIsSecretProtected(val)
+				&& Ps5LinkGetSecret(settings_backup, key, QMetaType::fromType<QByteArray>()).toByteArray().isEmpty())
+			{
+				++undecryptableSecrets;
+			}
+		}
+		if(undecryptableSecrets > 0)
+		{
+			qWarning("PS5Link ImportSettings: rejected import because %d DPAPI-protected credential(s) came from another Windows account/PC and could not be decrypted. Existing profile was preserved.", undecryptableSecrets);
+			return false;
+		}
+		const int hostCount = settings_backup.beginReadArray("registered_hosts");
+		bool hostsValid = true;
+		for(int i = 0; i < hostCount; ++i)
+		{
+			settings_backup.setArrayIndex(i);
+			const QString prefix = QStringLiteral("registered_hosts/%1/").arg(i + 1);
+			const auto getSecretBytes = [&](const QString &subKey) {
+				const QVariant v = settings_backup.value(subKey);
+				if(Ps5LinkIsSecretProtected(v))
+					return Ps5LinkGetSecret(settings_backup, prefix + subKey, QMetaType::fromType<QByteArray>()).toByteArray();
+				return v.toByteArray();
+			};
+			if(getSecretBytes(QStringLiteral("rp_regist_key")).isEmpty()
+				|| getSecretBytes(QStringLiteral("rp_key")).isEmpty())
+			{
+				hostsValid = false;
+				break;
+			}
+		}
+		settings_backup.endArray();
+		if(!hostsValid)
+		{
+			qWarning("PS5Link ImportSettings: rejected import because a registered host entry is missing required registration keys. Existing profile was preserved.");
+			return false;
+		}
+		return true;
+	};
+	if(!canImportKeys())
+		return;
+
+	const auto copyImportedKeys = [&](QSettings &dst) {
+		dst.clear();
+		const QStringList keys = settings_backup.allKeys();
+		for(const QString &key : keys)
+		{
+			const QVariant val = settings_backup.value(key);
+			if(isSecretKey(key) && !Ps5LinkIsSecretProtected(val))
+				Ps5LinkSetSecret(dst, key, val);
+			else
+				dst.setValue(key, val);
+		}
+		dst.sync();
+	};
+
 	QString profile = settings_backup.value("settings/this_profile").toString();
 	if(profile.isEmpty())
 	{
-		settings.clear();
-		SaveRegisteredHosts();
-		SaveHiddenHosts();
-		SaveManualHosts();
-		SaveControllerMappings();
-		QStringList keys = settings_backup.allKeys();
-		for( QStringList::iterator i = keys.begin(); i != keys.end(); i++ )
-		{
-			settings.setValue( *i, settings_backup.value( *i ) );
-		}
+		copyImportedKeys(settings);
+		LoadRegisteredHosts(&settings);
+		LoadHiddenHosts(&settings);
+		LoadManualHosts(&settings);
+		LoadControllerMappings(&settings);
 		MigrateLegacyFrameMixerSetting(&settings, &placebo_settings, nullptr, true);
+		emit RegisteredHostsUpdated();
 		SetCurrentProfile(std::move(profile));
 	}
 	else
 	{
-		QSettings profile_settings(QCoreApplication::organizationName(), QStringLiteral("%1-%2").arg(QCoreApplication::applicationName(), profile));
-		profile_settings.clear();
-		SaveRegisteredHosts(&profile_settings);
-		SaveHiddenHosts(&profile_settings);
-		SaveManualHosts(&profile_settings);
-		SaveControllerMappings(&profile_settings);
-		QStringList keys = settings_backup.allKeys();
-		for( QStringList::iterator i = keys.begin(); i != keys.end(); i++ )
-		{
-			profile_settings.setValue( *i, settings_backup.value( *i ) );
-		}
+		QSettings profile_settings(QSettings::defaultFormat(), QSettings::UserScope, QCoreApplication::organizationName(), QStringLiteral("%1-%2").arg(QCoreApplication::applicationName(), profile));
+		copyImportedKeys(profile_settings);
+		LoadRegisteredHosts(&profile_settings);
+		LoadHiddenHosts(&profile_settings);
+		LoadManualHosts(&profile_settings);
+		LoadControllerMappings(&profile_settings);
 		MigrateLegacyFrameMixerSetting(&profile_settings, &placebo_settings, nullptr, true);
+		emit RegisteredHostsUpdated();
 		SetCurrentProfile(std::move(profile));
 	}
 }
@@ -405,14 +485,22 @@ uint32_t Settings::GetLogLevelMask()
 	return mask;
 }
 
+namespace {
+#ifdef PS5LINK_BUILD
+constexpr auto clientGeometryKey = "settings/console_window_geometry";
+#else
+constexpr auto clientGeometryKey = "settings/geometry";
+#endif
+}
+
 QRect Settings::GetGeometry() const
 {
-	return settings.value("settings/geometry", QRect()).toRect();
+	return settings.value(clientGeometryKey, QRect()).toRect();
 }
 
 void Settings::SetGeometry(QRect geometry)
 {
-	settings.setValue("settings/geometry", geometry);
+	settings.setValue(clientGeometryKey, geometry);
 }
 
 QRect Settings::GetStreamGeometry() const
@@ -933,22 +1021,22 @@ void Settings::SetEchoSuppressLevel(int reduceby)
 
 QString Settings::GetPsnAuthToken() const
 {
-	return settings.value("settings/psn_auth_token").toString();
+	return Ps5LinkGetSecret(settings, "settings/psn_auth_token", QMetaType::fromType<QString>()).toString();
 }
 
 void Settings::SetPsnAuthToken(QString auth_token)
 {
-	settings.setValue("settings/psn_auth_token", auth_token);
+	Ps5LinkSetSecret(settings, "settings/psn_auth_token", auth_token);
 }
 
 QString Settings::GetPsnRefreshToken() const
 {
-	return settings.value("settings/psn_refresh_token").toString();
+	return Ps5LinkGetSecret(settings, "settings/psn_refresh_token", QMetaType::fromType<QString>()).toString();
 }
 
 void Settings::SetPsnRefreshToken(QString refresh_token)
 {
-	settings.setValue("settings/psn_refresh_token", refresh_token);
+	Ps5LinkSetSecret(settings, "settings/psn_refresh_token", refresh_token);
 }
 
 QString Settings::GetPsnAuthTokenExpiry() const
@@ -1085,12 +1173,12 @@ void Settings::SetStreamMenuShortcut4(uint button) {
 
 QString Settings::GetPsnAccountId() const
 {
-	return settings.value("settings/psn_account_id").toString();
+	return Ps5LinkGetSecret(settings, "settings/psn_account_id", QMetaType::fromType<QString>()).toString();
 }
 
 void Settings::SetPsnAccountId(QString account_id)
 {
-	settings.setValue("settings/psn_account_id", account_id);
+	Ps5LinkSetSecret(settings, "settings/psn_account_id", account_id);
 }
 
 ChiakiConnectVideoProfile Settings::GetVideoProfileLocalPS4()
@@ -2136,7 +2224,7 @@ void Settings::SaveProfiles()
 
 void Settings::DeleteProfile(QString profile)
 {
-	QSettings delete_profile(QCoreApplication::organizationName(), QStringLiteral("%1-%2").arg(QCoreApplication::applicationName(), profile));
+	QSettings delete_profile(QSettings::defaultFormat(), QSettings::UserScope, QCoreApplication::organizationName(), QStringLiteral("%1-%2").arg(QCoreApplication::applicationName(), profile));
 	registered_hosts.clear();
 	manual_hosts.clear();
 	controller_mappings.clear();
@@ -2501,3 +2589,88 @@ QMap<Qt::Key, int> Settings::GetControllerMappingForDecoding()
 	}
 	return result;
 }
+
+#ifdef PS5LINK_BUILD
+void Settings::ApplyPxPlayKeyboardPreset()
+{
+	ClearKeyMapping();
+	const QMap<int, Qt::Key> preset = {
+		{CHIAKI_CONTROLLER_BUTTON_CROSS, Qt::Key_Return},
+		{CHIAKI_CONTROLLER_BUTTON_MOON, Qt::Key_Backspace},
+		{CHIAKI_CONTROLLER_BUTTON_PYRAMID, Qt::Key_Space},
+		{CHIAKI_CONTROLLER_BUTTON_BOX, Qt::Key_C},
+		{CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT, Qt::Key_Right},
+		{CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT, Qt::Key_Left},
+		{CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN, Qt::Key_Down},
+		{CHIAKI_CONTROLLER_BUTTON_DPAD_UP, Qt::Key_Up},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_X_UP), Qt::Key_D},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_X_DOWN), Qt::Key_A},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_Y_DOWN), Qt::Key_S},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_Y_UP), Qt::Key_W},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_X_UP), Qt::Key_L},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_X_DOWN), Qt::Key_J},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_Y_DOWN), Qt::Key_K},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_Y_UP), Qt::Key_I},
+		{CHIAKI_CONTROLLER_BUTTON_R1, Qt::Key_E},
+		{CHIAKI_CONTROLLER_BUTTON_L1, Qt::Key_Q},
+		{CHIAKI_CONTROLLER_ANALOG_BUTTON_R2, Qt::Key_4},
+		{CHIAKI_CONTROLLER_ANALOG_BUTTON_L2, Qt::Key_1},
+		{CHIAKI_CONTROLLER_BUTTON_OPTIONS, Qt::Key_O},
+		{CHIAKI_CONTROLLER_BUTTON_SHARE, Qt::Key_F},
+		{CHIAKI_CONTROLLER_BUTTON_TOUCHPAD, Qt::Key_T},
+		{CHIAKI_CONTROLLER_BUTTON_PS, Qt::Key_Escape},
+	};
+	for(auto it = preset.constBegin(); it != preset.constEnd(); ++it)
+		SetControllerButtonMapping(it.key(), it.value());
+}
+
+void Settings::ResetVideoSettings()
+{
+	const QStringList keys = {
+		"settings/rtx_vsr_quality", "settings/dx12_enabled", "settings/dx12_frame_generation",
+		"settings/dx12_dlss_sr", "settings/dx12_fsr", "settings/dx12_present_mode",
+		"settings/dx12_aspect", "settings/dx12_ambient_style", "settings/dx12_upscale_height",
+		"settings/dx12_sharpness", "settings/dx12_error_concealment", "settings/dx12_window_mode",
+		"settings/dx12_dither", "settings/dx12_deband", "settings/dx12_hdr_passthrough",
+		"settings/dx12_hdr_paper_white",
+		"settings/dx12_contrast", "settings/dx12_saturation", "settings/dx12_gamma",
+		"settings/vsync", "settings/use_zero_copy", "settings/vulkan_deferred_swap"
+	};
+	for(const QString &key : keys)
+		settings.remove(key);
+}
+
+void Settings::ResetStreamSettings()
+{
+	const QStringList keys = {
+		"settings/wifi_streaming_mode", "settings/prevent_display_sleep", "settings/performance_mode",
+		"settings/controller_polling_ms", "settings/gamepad_quit_hotkey",
+		"settings/enable_rumble", "settings/enable_adaptive_triggers", "settings/enable_gyro_reset",
+		"settings/lightbar_mode", "settings/theme_mode", "settings/volume_controls_system",
+		"settings/hide_on_screen_controls", "settings/show_mic_button",
+		"settings/show_aspect_button", "settings/show_volume_buttons", "settings/always_request_idr",
+		"settings/dx12_touchpad_width", "settings/audio_video_disabled",
+		"settings/idr_on_fec_failure", "settings/show_stream_stats"
+	};
+	for(const QString &key : keys)
+		settings.remove(key);
+}
+
+QString Settings::GetDataDirectory() const
+{
+	const QFileInfo info(settings.fileName());
+	if(!info.absolutePath().isEmpty())
+		return info.absolutePath();
+	return QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+}
+
+QString Settings::GetControllersDirectory() const
+{
+	return QDir(GetDataDirectory()).filePath(QStringLiteral("Gamecontroller"));
+}
+
+QString Settings::GetShadersDirectory() const
+{
+	return QDir(GetDataDirectory()).filePath(QStringLiteral("Shaders"));
+}
+#endif

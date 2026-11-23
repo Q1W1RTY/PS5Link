@@ -6,9 +6,10 @@ import org.streetpea.chiaking
 
 Rectangle {
     id: view
+    property bool quickLaunch: false
     property bool allowClose: false
     property bool textVisible: false
-    color: "black"
+    color: "#18181B"
 
     function stop() {
         if (!allowClose)
@@ -20,6 +21,7 @@ Rectangle {
     function cancel() {
         if(!allowClose)
             return;
+        quickTimer.stop();
         view.textVisible = false;
         infoLabel.text = qsTr("Cancelling connection...");
         failTimer.start();
@@ -83,6 +85,23 @@ Rectangle {
         onTriggered: {
             view.allowClose = true
             view.textVisible = true
+        }
+    }
+
+    Timer {
+        id: quickTimer
+        interval: 150
+        repeat: true
+        running: view.quickLaunch
+        readonly property double deadline: Date.now() + 12000
+        onTriggered: {
+            const result = Chiaki.tryQuickConnect();
+            if (result === Chiaki.QuickConnectResult.Started) {
+                stop();
+            } else if (result === Chiaki.QuickConnectResult.ChooseConsole || Date.now() >= deadline) {
+                stop();
+                root.showMainView();
+            }
         }
     }
 

@@ -17,6 +17,7 @@ extern "C" {
 #include <libplacebo/opengl.h>
 #include <libplacebo/options.h>
 #include <libplacebo/vulkan.h>
+#include <memory>
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders/custom.h>
 #include <libplacebo/utils/frame_queue.h>
@@ -65,6 +66,9 @@ class QmlMainWindow : public QWindow
     Q_PROPERTY(VideoPreset videoPreset READ videoPreset WRITE setVideoPreset NOTIFY videoPresetChanged)
     Q_PROPERTY(bool directStream READ directStream NOTIFY directStreamChanged)
     Q_PROPERTY(int runtimeRendererBackend READ runtimeRendererBackend CONSTANT)
+    Q_PROPERTY(bool rtxVsrAvailable READ rtxVsrAvailable CONSTANT)
+    Q_PROPERTY(int rtxVsrQuality READ rtxVsrQuality WRITE setRtxVsrQuality NOTIFY rtxVsrQualityChanged)
+    Q_PROPERTY(bool rtxVsrActive READ rtxVsrActive NOTIFY rtxVsrActiveChanged)
     Q_PROPERTY(double queueDepthAverage READ queueDepthAverage NOTIFY queueDepthAverageChanged)
     Q_PROPERTY(double pendingFrameAge READ pendingFrameAge NOTIFY pendingFrameAgeChanged)
 
@@ -102,13 +106,17 @@ public:
     };
     Q_ENUM(VideoPreset);
 
-    QmlMainWindow(Settings *settings,  bool exit_app_on_stream_exit = false);
+    QmlMainWindow(Settings *settings, bool exit_app_on_stream_exit = false, bool direct_stream = false);
     QmlMainWindow(const StreamSessionConnectInfo &connect_info);
     ~QmlMainWindow();
     void updateWindowType(WindowType type);
     void setSettings(Settings *new_settings);
 
     bool hasVideo() const;
+    bool rtxVsrAvailable() const;
+    int rtxVsrQuality() const;
+    void setRtxVsrQuality(int quality);
+    bool rtxVsrActive() const;
     int droppedFrames() const;
     void increaseDroppedFrames();
 
@@ -137,6 +145,7 @@ public:
 
     void fullscreenTime();
     void normalTime();
+    void restoreClientWindow();
 
     bool isStreamWindowAdjustable() { return is_stream_window_adjustable; }
     void setStreamWindowAdjustable(bool adjustable) { is_stream_window_adjustable = adjustable; }
@@ -168,9 +177,19 @@ public slots:
     void presentFrame(ChiakiFfmpegFrame frame, int32_t frames_lost, qint64 decoder_delivery_us = 0);
 
     AVBufferRef *vulkanHwDeviceCtx();
+#ifdef PS5LINK_BUILD
+    bool prepareReplayFrame(ChiakiFfmpegFrame &frame);
+    void showReplayMenu();
+    void setExternalStatsTarget(QWindow *target);
+    void showFullStreamSettings();
+    Q_INVOKABLE void returnToExternalStream();
+    quint64 submittedFrameCount() const { return submitted_frames.loadRelaxed(); }
+#endif
 
 signals:
     void hasVideoChanged();
+    void rtxVsrQualityChanged();
+    void rtxVsrActiveChanged();
     void droppedFramesChanged();
     void keepVideoChanged();
     void videoModeChanged();
@@ -318,6 +337,9 @@ private:
     bool is_window_adjustable = false;
     bool is_stream_window_adjustable = false;
     QAtomicInteger<int> dropped_frames_current = 0;
+#ifdef PS5LINK_BUILD
+    QAtomicInteger<quint64> submitted_frames{0};
+#endif
     bool going_full = false;
     VideoMode video_mode = VideoMode::Normal;
     float zoom_factor = 0;
@@ -339,6 +361,11 @@ private:
     pl_log placebo_log = {};
     pl_vk_inst placebo_vk_inst = {};
     pl_vulkan placebo_vulkan = {};
+#ifdef PS5LINK_BUILD
+    std::unique_ptr<class RtxVsrPass> rtx_vsr;
+    QAtomicInteger<int> rtx_vsr_quality{0};
+    QAtomicInteger<int> rtx_vsr_active{0};
+#endif
     pl_opengl placebo_opengl = {};
     pl_swapchain placebo_swapchain = {};
     pl_renderer placebo_renderer = {};

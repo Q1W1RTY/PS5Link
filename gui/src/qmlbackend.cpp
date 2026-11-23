@@ -1,3 +1,8 @@
+#include <ps5link.h>
+#ifdef PS5LINK_BUILD
+#include <dx12replay.h>
+#include <cstdio>
+#endif
 #include "qmlbackend.h"
 #include "qmlsettings.h"
 #include "qmlmainwindow.h"
@@ -334,10 +339,17 @@ QmlBackend::QmlBackend(Settings *settings, QmlMainWindow *window)
     connect(settings, &Settings::CurrentProfileChanged, this, &QmlBackend::profileChanged);
     connect(&discovery_manager, &DiscoveryManager::HostsUpdated, this, &QmlBackend::updateDiscoveryHosts);
     discovery_manager.SetSettings(settings);
+#ifdef PS5LINK_BUILD
+    setDiscoveryEnabled(settings->GetDiscoveryEnabled());
+#else
     setDiscoveryEnabled(true);
+#endif
     connect(ControllerManager::GetInstance(), &ControllerManager::AvailableControllersUpdated, this, &QmlBackend::updateControllers);
     connect(settings_qml, &QmlSettings::allowJoystickBackgroundEventsChanged, this, &QmlBackend::setAllowJoystickBackgroundEvents);
     connect(window, &QmlMainWindow::activeChanged, this, &QmlBackend::setIsAppActive);
+#ifdef PS5LINK_BUILD
+    connect(qGuiApp, &QGuiApplication::applicationStateChanged, this, &QmlBackend::setIsAppActive);
+#endif
     connect(this, &QmlBackend::sessionChanged, this, &QmlBackend::setIsAppActive);
     setAllowJoystickBackgroundEvents();
     setIsAppActive();
@@ -346,8 +358,13 @@ QmlBackend::QmlBackend(Settings *settings, QmlMainWindow *window)
     updateControllerMappings();
     connect(settings, &Settings::ControllerMappingsUpdated, this, &QmlBackend::updateControllerMappings);
     connect(this, &QmlBackend::controllersChanged, this, &QmlBackend::updateControllerMappings);
-    auto_connect_mac = settings->GetAutoConnectHost().GetServerMAC();
-    auto_connect_nickname = settings->GetAutoConnectHost().GetServerNickname();
+#ifdef PS5LINK_BUILD
+    suppress_profile_auto_connect = qGuiApp->property("ps5linkOpenAdvancedSettings").toBool()
+        || qGuiApp->property("ps5linkQuickConnect").toBool();
+#endif
+    const auto autoHost = suppress_profile_auto_connect ? RegisteredHost() : settings->GetAutoConnectHost();
+    auto_connect_mac = autoHost.GetServerMAC();
+    auto_connect_nickname = autoHost.GetServerNickname();
     psn_auto_connect_timer = new QTimer(this);
     psn_auto_connect_timer->setSingleShot(true);
     psn_reconnect_tries = 0;
@@ -544,6 +561,21 @@ void QmlBackend::teardownSession()
     // 3) Safe now: schedule the deferred delete and drop the member.
     session->deleteLater();
     session = nullptr;
+#ifdef PS5LINK_BUILD
+    if(dx12_output)
+    {
+        window->setExternalStatsTarget(nullptr);
+        dx12_output->report();
+        dx12_output.reset();
+        if(window && !window->isVisible() && !qApp->property("ps5linkPsnTestSeconds").toInt()
+            && !qApp->property("ps5linkExiting").toBool())
+        {
+            window->show();
+            window->raise();
+            window->requestActivate();
+        }
+    }
+#endif
 }
 
 QmlMainWindow *QmlBackend::qmlWindow() const
@@ -556,9 +588,48 @@ QmlSettings *QmlBackend::qmlSettings() const
     return settings_qml;
 }
 
+#ifdef PS5LINK_BUILD
+QmlBackend::FrameCounts QmlBackend::frameCounts() const
+{
+    const quint64 generated = dx12_output ? dx12_output->generatedFrames() : 0;
+    const quint64 submitted = dx12_output ? dx12_output->presentedFrames() + generated
+        : window->submittedFrameCount();
+    return {decoded_frames.loadRelaxed(), submitted, generated};
+}
+
+unsigned QmlBackend::dx12PresentedFrames() const
+{
+    return dx12_output ? dx12_output->presentedFrames() : 0;
+}
+
+unsigned QmlBackend::dx12DlssGeneratedFrames() const
+{
+    return dx12_output ? dx12_output->dlssGeneratedFrames() : 0;
+}
+
+void QmlBackend::activateDx12Output()
+{
+    if(dx12_output && dx12_output->isVisible())
+    {
+        dx12_output->raise();
+        dx12_output->requestActivate();
+        if(window && window->isVisible())
+            window->hide();
+    }
+}
+#endif
+
 StreamSession *QmlBackend::qmlSession() const
 {
     return session;
+}
+
+bool QmlBackend::toggleDx12Menu()
+{
+    if(!dx12_output || !dx12_output->isVisible())
+        return false;
+    dx12_output->openSettings();
+    return true;
 }
 
 void QmlBackend::updateAudioVolume()
@@ -641,10 +712,15 @@ void QmlBackend::profileChanged()
     settings_qml->setSettings(settings);
     discovery_manager.SetSettings(settings);
     window->setSettings(settings);
+#ifdef PS5LINK_BUILD
+    setDiscoveryEnabled(settings->GetDiscoveryEnabled());
+#else
     setDiscoveryEnabled(true);
+#endif
 
-    auto_connect_mac = settings->GetAutoConnectHost().GetServerMAC();
-    auto_connect_nickname = settings->GetAutoConnectHost().GetServerNickname();
+    const auto autoHost = suppress_profile_auto_connect ? RegisteredHost() : settings->GetAutoConnectHost();
+    auto_connect_mac = autoHost.GetServerMAC();
+    auto_connect_nickname = autoHost.GetServerNickname();
     psn_reconnect_timer->deleteLater();
     psn_auto_connect_timer->deleteLater();
     psn_auto_connect_timer = new QTimer(this);
@@ -737,7 +813,7 @@ bool QmlBackend::discoveryEnabled() const
 
 void QmlBackend::setDiscoveryEnabled(bool enabled)
 {
-    discovery_manager.SetActive(enabled);
+    discovery_manager.SetActive(enabled && Ps5LinkOnline());
     emit discoveryEnabledChanged();
 }
 
@@ -761,15 +837,7 @@ void QmlBackend::setConnectState(PsnConnectState connect_state)
 {
     psn_connect_state = connect_state;
     if(connect_state == PsnConnectState::ConnectFailed)
-    {
-        if(!this->settings->GetGeometry().isEmpty())
-        {
-            window->setGeometry(this->settings->GetGeometry());
-            window->normalTime();
-        }
-        else
-            window->showMaximized();
-    }
+        window->restoreClientWindow();
     emit connectStateChanged();
 }
 
@@ -957,6 +1025,8 @@ void QmlBackend::startSession(bool emit_session_changed)
 
 void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
 {
+    if(!Ps5LinkOnline())
+        return;
     pending_recovered_frame.storeRelaxed(0);
 
     if (autoConnect()) {
@@ -1113,12 +1183,117 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
             qCInfo(chiakiGui) << "Falling back to software decoder";
     }
 
+#ifdef PS5LINK_BUILD
+    if(qApp->property("ps5linkPsnTestSeconds").toInt())
+    {
+        session_info.audio_video_disabled = CHIAKI_AUDIO_DISABLED;
+        session_info.fullscreen = true;
+    }
+    const auto dx12Override = qApp->property("ps5linkDx12");
+    const bool useDx12 = dx12Override.isValid() ? dx12Override.toBool()
+        : !qApp->property("ps5linkPsnTestSeconds").toInt() && settings->GetDx12Enabled();
+    if(useDx12)
+    {
+        if(session_info.video_profile.codec != CHIAKI_CODEC_H265
+            && session_info.video_profile.codec != CHIAKI_CODEC_H265_HDR)
+        {
+            emit error(tr("DX12"), tr("Direct3D 12 requires H.265 (SDR or HDR)."));
+            return;
+        }
+        try
+        {
+            dx12_output = std::make_unique<Dx12ReplayWindow>();
+            dx12_frame_gap.storeRelaxed(0);
+            session_info.hw_decoder = "d3d12va";
+            session_info.hw_device_ctx = dx12_output->decoderDevice();
+            connect(dx12_output.get(), &QWindow::visibleChanged, this, [this](bool visible) {
+                if(!visible)
+                    stopSession(false);
+            });
+        }
+        catch(const std::exception &failure)
+        {
+            emit error(tr("DX12"), QString::fromUtf8(failure.what()));
+            return;
+        }
+    }
+#endif
     try {
         session = new StreamSession(session_info, this);
     } catch (const Exception &e) {
+#ifdef PS5LINK_BUILD
+        dx12_output.reset();
+#endif
         emit error(tr("Stream failed"), tr("Failed to initialize Stream Session: %1").arg(e.what()));
         return;
     }
+
+#ifdef PS5LINK_BUILD
+    auto syncSessionSettings = [this] {
+        if(session && settings_qml)
+            session->SyncLiveSettings(settings_qml->enableRumble(), settings_qml->enableAdaptiveTriggers(),
+                settings_qml->enableGyroReset(), settings_qml->lightbarMode());
+    };
+    if(settings_qml)
+    {
+        connect(settings_qml, &QmlSettings::enableRumbleChanged, session, syncSessionSettings);
+        connect(settings_qml, &QmlSettings::enableAdaptiveTriggersChanged, session, syncSessionSettings);
+        connect(settings_qml, &QmlSettings::enableGyroResetChanged, session, syncSessionSettings);
+        connect(settings_qml, &QmlSettings::lightbarModeChanged, session, syncSessionSettings);
+    }
+    if(dx12_output)
+    {
+        dx12_output->bindSession(session, settings_qml, window->rtxVsrQuality());
+        connect(dx12_output.get(), &Dx12ReplayWindow::gameplayKey, session, &StreamSession::HandleKeyboardEvent);
+        connect(dx12_output.get(), &Dx12ReplayWindow::vsrQualityChanged, window, &QmlMainWindow::setRtxVsrQuality);
+        auto *output = dx12_output.get();
+        output->prepareVideo(QSize(session_info.video_profile.width, session_info.video_profile.height), true);
+        connect(window, &QmlMainWindow::rtxVsrQualityChanged, output, [this, output] {
+            output->setVsrQuality(window->rtxVsrQuality());
+        });
+        connect(settings_qml, &QmlSettings::dx12FrameGenerationChanged, output, [this, output] {
+            output->setFrameGeneration(settings_qml->dx12FrameGeneration());
+        });
+        connect(dx12_output.get(), &Dx12ReplayWindow::allSettingsRequested, window, &QmlMainWindow::showFullStreamSettings, Qt::QueuedConnection);
+        connect(dx12_output.get(), &Dx12ReplayWindow::disconnectRequested, this, [this](bool sleep, bool exitApp) {
+            if(exitApp)
+            {
+                qApp->setProperty("ps5linkExiting", true);
+                QObject::connect(this, &QmlBackend::sessionChanged, qApp, [](StreamSession *active) {
+                    if(!active)
+                        QCoreApplication::quit();
+                });
+                QTimer::singleShot(3000, qApp, &QCoreApplication::quit);
+            }
+            stopSession(sleep);
+        }, Qt::QueuedConnection);
+        connect(output, &Dx12ReplayWindow::videoQueued, this, [this, output] {
+            if(dx12_output.get() != output)
+                return;
+            if(!output->isVisible())
+            {
+                const int wmode = qApp->property("ps5linkPsnTestSeconds").toInt()
+                    ? 0 : settings->GetDx12WindowMode();
+                output->applyWindowMode(wmode);
+                output->raise();
+                output->requestActivate();
+                if(window && window->isVisible())
+                    window->hide();
+            }
+        }, Qt::QueuedConnection);
+        connect(output, &Dx12ReplayWindow::firstFramePresented, this, [this, output] {
+            if(dx12_output.get() != output)
+                return;
+            activateDx12Output();
+        }, Qt::QueuedConnection);
+        connect(output, &Dx12ReplayWindow::renderingFailed, this, [this, output](const QString &failure) {
+            if(dx12_output.get() != output)
+                return;
+            std::fprintf(stderr, "DX12 presentation failed: %s\n", failure.toUtf8().constData());
+            stopSession(false);
+        }, Qt::QueuedConnection);
+    }
+#endif
 
     connect(session, &StreamSession::FfmpegFrameAvailable, frame_thread->parent(), [this, use_opengl_renderer]() {
         ChiakiFfmpegDecoder *decoder = session->GetFfmpegDecoder();
@@ -1128,14 +1303,36 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
         }
         int32_t frames_lost;
         ChiakiFfmpegFrame frame = chiaki_ffmpeg_decoder_pull_frame(decoder, &frames_lost);
+#ifdef PS5LINK_BUILD
+        decoded_frames.fetchAndAddRelaxed(frame.decoded_count);
+#endif
         if (!frame.frame)
             return;
+#ifdef PS5LINK_BUILD
+        const bool corrupt = (frame.frame->flags & AV_FRAME_FLAG_CORRUPT) || frame.frame->decode_error_flags;
+        if(corrupt)
+            session->RecordCorruptDecodedFrame();
+#endif
         logDecoderDeliveryStats(static_cast<qint64>(chiaki_time_now_monotonic_us()), frames_lost, frame.recovered);
         logDecoderFramePtsStats(static_cast<qint64>(chiaki_time_now_monotonic_us()), frame.pts, frame.duration);
         if (frame.recovered)
             pending_recovered_frame.storeRelaxed(1);
 
         const qint64 prepare_begin_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+#ifdef PS5LINK_BUILD
+        if(dx12_output)
+        {
+            auto decoded = std::shared_ptr<AVFrame>(frame.frame, [](AVFrame *value) { av_frame_free(&value); });
+            if(corrupt && session->HoldCorruptFrames())
+            {
+                dx12_frame_gap.storeRelaxed(1);
+                return;
+            }
+            const bool continuous = dx12_frame_gap.fetchAndStoreRelaxed(0) == 0 && frames_lost == 0 && !frame.recovered;
+            dx12_output->queueVideo(*decoded, continuous);
+            return;
+        }
+#endif
         if (!prepareFrameForPresentation(frame, use_opengl_renderer))
         {
             av_frame_free(&frame.frame);
@@ -1290,6 +1487,8 @@ void QmlBackend::deleteHost(int index)
 
 void QmlBackend::wakeUpHost(int index, QString nickname)
 {
+    if(!Ps5LinkOnline())
+        return;
     auto server = displayServerAt(index);
     if (!server.valid)
         return;
@@ -1377,6 +1576,8 @@ QVariantList QmlBackend::hiddenHosts() const
 
 bool QmlBackend::registerHost(const QString &host, const QString &psn_id, const QString &pin, const QString &cpin, bool broadcast, int target, const QJSValue &callback)
 {
+    if(!Ps5LinkOnline())
+        return false;
     ChiakiRegistInfo info = {};
     QByteArray hostb = host.toUtf8();
     info.host = hostb.constData();
@@ -1432,6 +1633,8 @@ bool QmlBackend::registerHost(const QString &host, const QString &psn_id, const 
 
 void QmlBackend::autoRegister()
 {
+    if(!Ps5LinkOnline())
+        return;
     const auto &server = regist_dialog_server;
     resume_session = false;
     StreamSessionConnectInfo info(
@@ -1530,12 +1733,84 @@ void QmlBackend::setWebEngineHints(QQuickWebEngineProfile *profile)
 }
 #endif
 
+QmlBackend::QuickConnectResult QmlBackend::tryQuickConnect()
+{
+    if (!Ps5LinkOnline())
+        return QuickConnectResult::ChooseConsole;
+    if (session)
+        return QuickConnectResult::Started;
+
+    auto target = settings->GetAutoConnectHost();
+    const auto registered = settings->GetRegisteredHosts();
+    if (!target.GetServerMAC().GetValue()) {
+        if (registered.size() != 1)
+            return QuickConnectResult::ChooseConsole;
+        target = registered.constFirst();
+    }
+    const HostMAC mac = target.GetServerMAC();
+    const auto discovered = discovery_manager.GetHosts();
+    for (int i = 0; i < discovered.size(); ++i) {
+        if (discovered.at(i).GetHostMAC() == mac) {
+            connectToHost(i, discovered.at(i).host_name);
+            return session ? QuickConnectResult::Started : QuickConnectResult::ChooseConsole;
+        }
+    }
+
+    const auto manual = settings->GetManualHosts();
+    for (int i = 0; i < manual.size(); ++i) {
+        if (manual.at(i).GetRegistered() && manual.at(i).GetMAC() == mac) {
+            connectToHost(discovered.size() + i, target.GetServerNickname());
+            return session ? QuickConnectResult::Started : QuickConnectResult::ChooseConsole;
+        }
+    }
+
+    if (!updating_psn_hosts && !settings->GetPsnAuthToken().isEmpty()
+        && !settings->GetPsnAuthTokenExpiry().isEmpty() && !settings->GetPsnRefreshToken().isEmpty()) {
+        const QString nickname = target.GetServerNickname();
+        const bool ps5 = chiaki_target_is_ps5(target.GetTarget());
+        int sameName = 0;
+        for (const auto &host : registered) {
+            if (host.GetServerNickname() == nickname && chiaki_target_is_ps5(host.GetTarget()) == ps5)
+                ++sameName;
+        }
+        auto match = psn_hosts.cend();
+        if (sameName == 1) {
+            for (auto it = psn_hosts.cbegin(); it != psn_hosts.cend(); ++it) {
+                if (it->IsPS5() != ps5 || it->GetName() != nickname)
+                    continue;
+                if (match != psn_hosts.cend())
+                    return QuickConnectResult::ChooseConsole;
+                match = it;
+            }
+        }
+        if (match != psn_hosts.cend()) {
+            DisplayServer server{};
+            server.valid = true;
+            server.registered = true;
+            server.psn_host = match.value();
+            server.duid = match.key();
+            server.registered_host = target;
+            connectToServer(server, nickname);
+            return QuickConnectResult::Started;
+        }
+    }
+
+    return discoveryEnabled() || !settings->GetPsnRefreshToken().isEmpty()
+        ? QuickConnectResult::Waiting : QuickConnectResult::ChooseConsole;
+}
+
 void QmlBackend::connectToHost(int index, QString nickname)
 {
-    window->setWindowAdjustable(false);
-    auto server = displayServerAt(index);
-    if (!server.valid)
+    if (!Ps5LinkOnline())
         return;
+    const auto server = displayServerAt(index);
+    if (server.valid)
+        connectToServer(server, std::move(nickname));
+}
+
+void QmlBackend::connectToServer(const DisplayServer &server, QString nickname)
+{
+    window->setWindowAdjustable(false);
 
     if (!server.registered) {
         regist_dialog_server = server;
@@ -1851,6 +2126,13 @@ void QmlBackend::setAllowJoystickBackgroundEvents()
 
 void QmlBackend::setIsAppActive()
 {
+#ifdef PS5LINK_BUILD
+    if(dx12_output)
+    {
+        ControllerManager::GetInstance()->SetIsAppActive(QGuiApplication::applicationState() == Qt::ApplicationActive);
+        return;
+    }
+#endif
     ControllerManager::GetInstance()->SetIsAppActive(window->isActive());
 }
 
@@ -2534,6 +2816,8 @@ bool QmlBackend::checkPsnRedirectURL(const QUrl &url) const
 
 void QmlBackend::initPsnAuth(const QUrl &url, const QJSValue &callback)
 {
+    if(!Ps5LinkOnline())
+        return;
     const QJSValue cb = callback;
     if (!url.toString().startsWith(QString::fromStdString(PSNAuth::REDIRECT_PAGE)))
     {
@@ -2565,6 +2849,8 @@ void QmlBackend::initPsnAuth(const QUrl &url, const QJSValue &callback)
 
 void QmlBackend::refreshAuth()
 {
+    if(!Ps5LinkOnline())
+        return;
     PSNToken *psnToken = new PSNToken(settings, this);
     connect(psnToken, &PSNToken::PSNTokenError, this, [this](const QString &error) {
         qCWarning(chiakiGui) << "Could not refresh token. Automatic PSN Connection Unavailable!" << error;
@@ -2581,6 +2867,8 @@ void QmlBackend::refreshAuth()
 
 void QmlBackend::updatePsnHosts()
 {
+    if(!Ps5LinkOnline())
+        return;
     if(updating_psn_hosts)
     {
         qCInfo(chiakiGui) << "Already updating psn hosts, skipping...";
@@ -2653,6 +2941,8 @@ void QmlBackend::updatePsnHostsThread()
 
 void QmlBackend::refreshPsnToken()
 {
+    if(!Ps5LinkOnline())
+        return;
     QString expiry_s = settings->GetPsnAuthTokenExpiry();
     QString refresh = settings->GetPsnRefreshToken();
     if(expiry_s.isEmpty() || refresh.isEmpty())

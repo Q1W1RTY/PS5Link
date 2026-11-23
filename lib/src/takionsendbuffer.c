@@ -20,6 +20,7 @@ struct chiaki_takion_send_buffer_packet_t
 	ChiakiSeqNum32 seq_num;
 	uint64_t tries;
 	uint64_t last_send_ms; // chiaki_time_now_monotonic_ms()
+	uint64_t send_us;      // chiaki_time_now_monotonic_us() on initial send
 	uint8_t *buf;
 	size_t buf_size;
 }; // ChiakiTakionSendBufferPacket
@@ -38,6 +39,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_buffer_init(ChiakiTakionSendBuf
 		return CHIAKI_ERR_MEMORY;
 	send_buffer->packets_size = size;
 	send_buffer->packets_count = 0;
+	__atomic_store_n(&send_buffer->rtt_us, 0, __ATOMIC_RELAXED);
 
 	send_buffer->should_stop = false;
 
@@ -79,6 +81,8 @@ CHIAKI_EXPORT void chiaki_takion_send_buffer_fini(ChiakiTakionSendBuffer *send_b
 	chiaki_cond_fini(&send_buffer->cond);
 	chiaki_mutex_fini(&send_buffer->mutex);
 	free(send_buffer->packets);
+	send_buffer->packets = NULL;
+	__atomic_store_n(&send_buffer->rtt_us, 0, __ATOMIC_RELAXED);
 }
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_buffer_push(ChiakiTakionSendBuffer *send_buffer, ChiakiSeqNum32 seq_num, uint8_t *buf, size_t buf_size)
@@ -107,7 +111,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_buffer_push(ChiakiTakionSendBuf
 	ChiakiTakionSendBufferPacket *packet = &send_buffer->packets[send_buffer->packets_count++];
 	packet->seq_num = seq_num;
 	packet->tries = 0;
-	packet->last_send_ms = chiaki_time_now_monotonic_ms();
+	packet->send_us = chiaki_time_now_monotonic_us();
+	packet->last_send_ms = packet->send_us / 1000;
 	packet->buf = buf;
 	packet->buf_size = buf_size;
 
@@ -135,6 +140,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_buffer_ack(ChiakiTakionSendBuff
 	if(acked_seq_nums_count)
 		*acked_seq_nums_count = 0;
 
+	const uint64_t now_us = chiaki_time_now_monotonic_us();
 	size_t i;
 	size_t shift = 0; // amount to shift back
 	size_t shift_start = SIZE_MAX;
@@ -142,6 +148,19 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_buffer_ack(ChiakiTakionSendBuff
 	{
 		if(send_buffer->packets[i].seq_num == seq_num || chiaki_seq_num_32_lt(send_buffer->packets[i].seq_num, seq_num))
 		{
+			if(send_buffer->packets[i].seq_num == seq_num
+				&& send_buffer->packets[i].tries == 0
+				&& send_buffer->packets[i].send_us > 0
+				&& now_us >= send_buffer->packets[i].send_us)
+			{
+				const uint64_t sample_us = now_us - send_buffer->packets[i].send_us;
+				if(sample_us < 5000000) // ignore bogus outliers > 5 s
+				{
+					const uint64_t prev_rtt = __atomic_load_n(&send_buffer->rtt_us, __ATOMIC_RELAXED);
+					const uint64_t next_rtt = prev_rtt ? (prev_rtt * 7 + sample_us) / 8 : sample_us;
+					__atomic_store_n(&send_buffer->rtt_us, next_rtt, __ATOMIC_RELAXED);
+				}
+			}
 			if(acked_seq_nums && acked_seq_nums_count)
 				acked_seq_nums[(*acked_seq_nums_count)++] = send_buffer->packets[i].seq_num;
 
@@ -186,6 +205,13 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_buffer_ack(ChiakiTakionSendBuff
 
 	chiaki_mutex_unlock(&send_buffer->mutex);
 	return err;
+}
+
+CHIAKI_EXPORT uint64_t chiaki_takion_send_buffer_get_rtt_us(ChiakiTakionSendBuffer *send_buffer)
+{
+	if(!send_buffer)
+		return 0;
+	return __atomic_load_n(&send_buffer->rtt_us, __ATOMIC_RELAXED);
 }
 
 static void takion_send_buffer_resend(ChiakiTakionSendBuffer *send_buffer);

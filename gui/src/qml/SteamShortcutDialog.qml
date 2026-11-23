@@ -184,7 +184,7 @@ DialogView {
 
                 Label {
                     id: restartArea
-                    text: "In order for " + name.text.trim() + " to appear in Steam,\nSteam must be restarted!"
+                    text: qsTr("Restart Steam to show %1.").arg(name.text.trim())
                     wrapMode: Text.Wrap
                     Keys.onReturnPressed: if (restartDialog.standardButtons == Dialog.Close) restartDialog.close()
                     Keys.onEscapePressed: restartDialog.close()

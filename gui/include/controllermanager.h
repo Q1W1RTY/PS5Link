@@ -32,6 +32,7 @@ class ControllerManager : public QObject
 		QSet<SDL_JoystickID> available_controllers;
 #endif
 		QMap<int, Controller *> open_controllers;
+		QTimer *poll_timer = nullptr;
 		bool creating_controller_mapping;
 		bool joystick_allow_background_events;
 		bool is_app_active;
@@ -58,6 +59,7 @@ class ControllerManager : public QObject
 		void SetIsAppActive(bool active);
 		void SetDualSenseIntensity(uint8_t intensity) { dualsense_intensity = intensity; };
 		uint8_t GetDualSenseIntensity() { return dualsense_intensity; };
+		void SetPollingIntervalMs(int interval_ms);
 		void creatingControllerMapping(bool creating_controller_mapping);
 		QSet<int> GetAvailableControllers();
 		Controller *OpenController(int device_id);
@@ -102,7 +104,11 @@ class Controller : public QObject
 		bool is_dualsense_edge;
 		bool has_led;
 		bool micbutton_push;
+		bool is_native_bt = false;
+		uint64_t last_bt_input_seq = 0;
 		uint16_t firmware_version;
+
+		void PollNativeBt();
 
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 		QMap<QPair<Sint64, Sint64>, uint8_t> touch_ids;

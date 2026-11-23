@@ -264,6 +264,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_session_init(ChiakiSession *session, Chiaki
 	session->connect_info.enable_keyboard = connect_info->enable_keyboard;
 	session->connect_info.enable_dualsense = connect_info->enable_dualsense;
 	session->connect_info.enable_idr_on_fec_failure = connect_info->enable_idr_on_fec_failure;
+	session->connect_info.always_request_idr_on_loss = connect_info->always_request_idr_on_loss;
+	session->connect_info.video_reorder_window_ms = connect_info->video_reorder_window_ms;
 
 	return CHIAKI_ERR_SUCCESS;
 
@@ -952,7 +954,6 @@ static ChiakiErrorCode session_thread_request_session(ChiakiSession *session, Ch
 	}
 
 	CHIAKI_LOGI(session->log, "Sending session request");
-	chiaki_log_hexdump(session->log, CHIAKI_LOG_VERBOSE, (uint8_t *)send_buf, request_len);
 	if(!session->rudp)
 	{
 		chiaki_mutex_unlock(&session->state_mutex);

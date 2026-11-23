@@ -1366,7 +1366,6 @@ static ChiakiErrorCode ctrl_connect(ChiakiCtrl *ctrl)
 		goto error;
 
 	CHIAKI_LOGI(session->log, "Sending ctrl request");
-	chiaki_log_hexdump(session->log, CHIAKI_LOG_VERBOSE, (const uint8_t *)send_buf, (size_t)request_len);
 
 	if(session->rudp)
 	{

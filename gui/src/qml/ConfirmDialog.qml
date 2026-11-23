@@ -15,6 +15,7 @@ Dialog {
     x: Math.round((root.width - width) / 2)
     y: Math.round((root.height - height) / 2)
     modal: true
+    padding: 24
     Material.roundedScale: Material.MediumScale
     onOpened: label.forceActiveFocus(Qt.TabFocusReason)
     onAccepted: {
@@ -39,9 +40,15 @@ Dialog {
         label.focus = false;
     }
 
+    background: Rectangle {
+        radius: 22
+        color: "#232328"
+        border.color: "#383842"
+        border.width: 1
+    }
+
     Component.onCompleted: {
         header.horizontalAlignment = Text.AlignHCenter;
-        // Qt 6.6: Workaround dialog background becoming immediately transparent during close animation
         header.background = null;
     }
 
@@ -50,51 +57,63 @@ Dialog {
 
         Label {
             id: label
+            color: "#F0F1F3"
+            font.pixelSize: 16
             Keys.onEscapePressed: dialog.reject()
             Keys.onReturnPressed: dialog.accept()
         }
 
         RowLayout {
             Layout.alignment: Qt.AlignCenter
-            spacing: 20
+            spacing: 14
 
             Button {
                 text: qsTr("Yes")
-                Material.background: Material.accent
-                flat: true
-                leftPadding: 50
+                leftPadding: 46
+                rightPadding: 20
+                implicitHeight: 40
                 onClicked: dialog.accept()
-                Material.roundedScale: Material.SmallScale
+                background: Rectangle {
+                    radius: 14
+                    color: parent.down ? "#0768CC" : parent.hovered ? "#2494FF" : "#0A84FF"
+                    border.color: "#48A4FF"
+                    border.width: 1
+                }
 
                 Image {
                     anchors {
                         left: parent.left
                         verticalCenter: parent.verticalCenter
-                        leftMargin: 12
+                        leftMargin: 14
                     }
-                    width: 28
-                    height: 28
+                    width: 22
+                    height: 22
                     sourceSize: Qt.size(width, height)
                     source: root.controllerButton("cross")
                 }
             }
 
             Button {
-                Material.background: Material.accent
                 text: qsTr("No")
-                flat: true
-                leftPadding: 50
+                leftPadding: 46
+                rightPadding: 20
+                implicitHeight: 40
                 onClicked: dialog.reject()
-                Material.roundedScale: Material.SmallScale
+                background: Rectangle {
+                    radius: 14
+                    color: parent.down ? "#25252C" : parent.hovered ? "#3E3E48" : "#2E2E36"
+                    border.color: "#40404B"
+                    border.width: 1
+                }
 
                 Image {
                     anchors {
                         left: parent.left
                         verticalCenter: parent.verticalCenter
-                        leftMargin: 12
+                        leftMargin: 14
                     }
-                    width: 28
-                    height: 28
+                    width: 22
+                    height: 22
                     sourceSize: Qt.size(width, height)
                     source: root.controllerButton("moon")
                 }

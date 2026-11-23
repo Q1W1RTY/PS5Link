@@ -70,6 +70,13 @@ QmlController::QmlController(Controller *c, uint32_t shortcut, QObject *t, QObje
         if ((old_buttons & escape_shortcut) == escape_shortcut && (buttons & escape_shortcut) != escape_shortcut)
             sendKey(Qt::Key_O, Qt::ControlModifier);
 
+#ifdef PS5LINK_BUILD
+        constexpr uint32_t quit_combo = CHIAKI_CONTROLLER_BUTTON_OPTIONS | CHIAKI_CONTROLLER_BUTTON_SHARE;
+        if (QGuiApplication::instance()->property("ps5linkGamepadQuitHotkey").toBool()
+            && (old_buttons & quit_combo) == quit_combo && (buttons & quit_combo) != quit_combo)
+            sendKey(Qt::Key_Q, Qt::ControlModifier | Qt::ShiftModifier);
+#endif
+
         old_buttons = buttons;
     });
 }
@@ -137,6 +144,11 @@ void QmlController::sendKey(Qt::Key key, Qt::KeyboardModifiers modifiers)
     if (modifiers == Qt::NoModifier) {
         if (auto *focus_window = qobject_cast<QQuickWindow *>(QGuiApplication::focusWindow()))
             receiver = focus_window;
+#ifdef PS5LINK_BUILD
+        else if (auto *focus_window = QGuiApplication::focusWindow();
+            focus_window && focus_window->property("ps5linkDx12MenuOpen").toBool())
+            receiver = focus_window;
+#endif
     }
 
     QKeyEvent press(QEvent::KeyPress, key, modifiers);

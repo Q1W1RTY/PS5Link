@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
 #include <controllermanager.h>
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+#include <ds5bt.h>
+#endif
 
 #include <QCoreApplication>
 #include <QByteArray>
+#include <QDir>
+#include <QFileInfo>
+#include <QSettings>
 #include <QTimer>
+#include <cstdio>
 
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 #include <SDL.h>
@@ -153,9 +160,25 @@ ControllerManager::ControllerManager(QObject *parent)
 	if(SDL_Init(SDL_INIT_GAMECONTROLLER) < 0)
 		return;
 
-	auto timer = new QTimer(this);
-	connect(timer, &QTimer::timeout, this, &ControllerManager::HandleEvents);
-	timer->start(UPDATE_INTERVAL_MS);
+#ifdef PS5LINK_BUILD
+	const QString dataDir = QFileInfo(QSettings(QSettings::IniFormat, QSettings::UserScope,
+		QCoreApplication::organizationName(), QCoreApplication::applicationName()).fileName()).absolutePath();
+	const QString customDb = QDir(dataDir).filePath(QStringLiteral("Gamecontroller/gamecontrollerdb.txt"));
+	if(QFileInfo::exists(customDb))
+	{
+		const int added = SDL_GameControllerAddMappingsFromFile(customDb.toUtf8().constData());
+		if(added >= 0)
+			fprintf(stdout, "[PS5Link] Loaded %d custom SDL controller mapping(s) from %s.\n",
+				added, customDb.toUtf8().constData());
+		else
+			fprintf(stderr, "[PS5Link] Failed to load custom gamecontrollerdb.txt: %s\n", SDL_GetError());
+	}
+#endif
+
+	poll_timer = new QTimer(this);
+	poll_timer->setTimerType(Qt::PreciseTimer);
+	connect(poll_timer, &QTimer::timeout, this, &ControllerManager::HandleEvents);
+	poll_timer->start(UPDATE_INTERVAL_MS);
 	auto move_timer = new QTimer(this);
 	connect(move_timer, &QTimer::timeout, this, &ControllerManager::CheckMoved);
 	move_timer->start(MOVE_CHECK_MS);
@@ -169,6 +192,9 @@ ControllerManager::~ControllerManager()
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	open_controllers.clear();
 	SDL_Quit();
+#endif
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	Ds5BtManager::instance().shutdown();
 #endif
 }
 
@@ -191,6 +217,15 @@ void ControllerManager::SetIsAppActive(bool active)
 	this->is_app_active = active;
 }
 
+void ControllerManager::SetPollingIntervalMs(int interval_ms)
+{
+	if(!poll_timer)
+		return;
+	const int clamped = qBound(1, interval_ms, 16);
+	poll_timer->setTimerType(clamped <= 4 ? Qt::PreciseTimer : Qt::CoarseTimer);
+	poll_timer->setInterval(clamped);
+}
+
 void ControllerManager::SetButtonsByPos()
 {
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
@@ -201,14 +236,34 @@ void ControllerManager::SetButtonsByPos()
 void ControllerManager::UpdateAvailableControllers()
 {
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	Ds5BtManager::instance().pollDevices();
+	const bool native_bt_connected = Ds5BtManager::instance().isConnected();
+	const bool has_usb_dualsense = Ds5BtManager::instance().hasUsbDualSense();
+#endif
 	QSet<SDL_JoystickID> current_controllers;
 	for(int i=0; i<SDL_NumJoysticks(); i++)
 	{
 		if(!SDL_IsGameController(i))
 			continue;
 
-		// We'll try to identify pads with Motion Control
-		SDL_JoystickGUID guid = SDL_JoystickGetGUID(SDL_JoystickOpen(i));
+		// Use SDL_JoystickGetDeviceGUID without leaking an opened SDL_Joystick handle
+		SDL_JoystickGUID guid = SDL_JoystickGetDeviceGUID(i);
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+		if(native_bt_connected)
+		{
+			const uint16_t vendor = SDL_JoystickGetDeviceVendor(i);
+			const uint16_t product = SDL_JoystickGetDeviceProduct(i);
+			const bool is_dualsense_vid_pid = (vendor == 0x054c && (product == 0x0ce6 || product == 0x0df2));
+			const bool is_bt_bus = (guid.data[0] == 0x05); // SDL_HARDWARE_BUS_BLUETOOTH
+			if(is_dualsense_vid_pid && (is_bt_bus || !has_usb_dualsense))
+			{
+				// Managed by Ds5BtManager; skip opening via SDL so SDL HIDAPI does not
+				// send conflicting 0x31 output reports or misparse 0x31 audio packets.
+				continue;
+			}
+		}
+#endif
 		char guid_str[256];
 		SDL_JoystickGetGUIDString(guid, guid_str, sizeof(guid_str));
 
@@ -227,6 +282,11 @@ void ControllerManager::UpdateAvailableControllers()
 		current_controllers.insert(SDL_JoystickGetDeviceInstanceID(i));
 	}
 
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(native_bt_connected)
+		current_controllers.insert(Ds5BtManager::kVirtualDeviceId);
+#endif
+
 	if(current_controllers != available_controllers)
 	{
 		available_controllers = std::move(current_controllers);
@@ -243,6 +303,17 @@ void ControllerManager::creatingControllerMapping(bool creating_controller_mappi
 void ControllerManager::HandleEvents()
 {
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	Ds5BtManager::instance().pollDevices();
+	const bool bt_connected = Ds5BtManager::instance().isConnected();
+	if(bt_connected != available_controllers.contains(Ds5BtManager::kVirtualDeviceId))
+		UpdateAvailableControllers();
+	if(bt_connected && (joystick_allow_background_events || is_app_active))
+	{
+		if(auto *bt_ctrl = open_controllers.value(Ds5BtManager::kVirtualDeviceId, nullptr))
+			bt_ctrl->PollNativeBt();
+	}
+#endif
 	SDL_Event event;
 	while(SDL_PollEvent(&event))
 	{
@@ -377,6 +448,19 @@ Controller::Controller(int device_id, ControllerManager *manager)
 
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	controller = nullptr;
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(device_id == Ds5BtManager::kVirtualDeviceId)
+	{
+		is_native_bt = true;
+		has_led = true;
+		const uint16_t bt_pid = Ds5BtManager::instance().productId();
+		is_dualsense_edge = (bt_pid == 0x0df2);
+		is_dualsense = !is_dualsense_edge;
+		state = Ds5BtManager::instance().getControllerState();
+		last_bt_input_seq = Ds5BtManager::instance().inputSequence();
+		return;
+	}
+#endif
 	for(int i=0; i<SDL_NumJoysticks(); i++)
 	{
 		if(SDL_JoystickGetDeviceInstanceID(i) == device_id)
@@ -415,6 +499,15 @@ Controller::Controller(int device_id, ControllerManager *manager)
 Controller::~Controller()
 {
 	Q_ASSERT(ref == 0);
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+	{
+		const uint8_t clear_effect[10] = { 0 };
+		this->SetTriggerEffects(0x05, clear_effect, 0x05, clear_effect);
+		this->SetRumble(0, 0);
+		return;
+	}
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(controller && SDL_WasInit(SDL_INIT_GAMECONTROLLER)!=0)
 	{
@@ -424,6 +517,35 @@ Controller::~Controller()
 		this->SetRumble(0,0);
 		SDL_GameControllerClose(controller);
 	}
+#endif
+}
+
+void Controller::PollNativeBt()
+{
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(!is_native_bt || !Ds5BtManager::instance().isConnected())
+		return;
+	if(Ds5BtManager::instance().consumeMicButtonPress())
+		emit MicButtonPush();
+
+	const uint64_t seq = Ds5BtManager::instance().inputSequence();
+	if(seq == last_bt_input_seq)
+		return;
+	last_bt_input_seq = seq;
+
+	const ChiakiControllerState next_state = Ds5BtManager::instance().getControllerState();
+	if(next_state.buttons != state.buttons
+		|| next_state.l2_state != state.l2_state
+		|| next_state.r2_state != state.r2_state
+		|| qAbs(int(next_state.left_x) - int(state.left_x)) > 2048
+		|| qAbs(int(next_state.left_y) - int(state.left_y)) > 2048
+		|| qAbs(int(next_state.right_x) - int(state.right_x)) > 2048
+		|| qAbs(int(next_state.right_y) - int(state.right_y)) > 2048)
+	{
+		manager->moved = true;
+	}
+	state = next_state;
+	emit StateChanged();
 #endif
 }
 
@@ -693,6 +815,10 @@ void Controller::Unref()
 
 bool Controller::IsConnected()
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+		return Ds5BtManager::instance().isConnected();
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	return controller && SDL_GameControllerGetAttached(controller);
 #else
@@ -711,6 +837,10 @@ int Controller::GetDeviceID()
 
 QString Controller::GetType()
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+		return QString::fromStdString(Ds5BtManager::instance().deviceName());
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return QString();
@@ -723,6 +853,10 @@ QString Controller::GetType()
 
 bool Controller::IsPS()
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+		return true;
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return false;
@@ -738,6 +872,14 @@ bool Controller::IsPS()
 
 QString Controller::GetGUIDString()
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+	{
+		return is_dualsense_edge
+			? QStringLiteral("050000004c050000f20d000000010000")
+			: QStringLiteral("050000004c050000e60c000000010000");
+	}
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return QString();
@@ -753,6 +895,14 @@ QString Controller::GetGUIDString()
 
 QString Controller::GetName()
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+	{
+		const QString name = QString::fromStdString(Ds5BtManager::instance().deviceName());
+		const QString addr = QString::fromStdString(Ds5BtManager::instance().bluetoothAddress());
+		return addr.isEmpty() ? name : QString("%1 (%2)").arg(name, addr);
+	}
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return QString();
@@ -768,6 +918,12 @@ QString Controller::GetName()
 
 QString Controller::GetVIDPIDString()
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+	{
+		return QString("0x054c:0x%1").arg(Ds5BtManager::instance().productId(), 4, 16, QChar('0'));
+	}
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return QString();
@@ -785,6 +941,10 @@ ChiakiControllerState Controller::GetState()
 
 bool Controller::IsWireless()
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+		return true;
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return false;
@@ -809,6 +969,13 @@ bool Controller::IsWireless()
 
 void Controller::SetDualSenseRumble(uint8_t left, uint8_t right)
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+	{
+		Ds5BtManager::instance().setRumble(left, right, manager->GetDualSenseIntensity());
+		return;
+	}
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return;
@@ -839,6 +1006,13 @@ void Controller::SetDualSenseRumble(uint8_t left, uint8_t right)
 
 void Controller::SetRumble(uint8_t left, uint8_t right)
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+	{
+		Ds5BtManager::instance().setRumble(left, right, manager->GetDualSenseIntensity());
+		return;
+	}
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return;
@@ -851,6 +1025,14 @@ void Controller::SetRumble(uint8_t left, uint8_t right)
 
 void Controller::ChangeLEDColor(const uint8_t *led_color)
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+	{
+		if(led_color)
+			Ds5BtManager::instance().setLedColor(led_color[0], led_color[1], led_color[2]);
+		return;
+	}
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller || !has_led)
 		return;
@@ -860,6 +1042,13 @@ void Controller::ChangeLEDColor(const uint8_t *led_color)
 
 void Controller::ChangePlayerIndex(const uint8_t player_index)
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+	{
+		Ds5BtManager::instance().setPlayerIndex(player_index);
+		return;
+	}
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return;
@@ -869,6 +1058,13 @@ void Controller::ChangePlayerIndex(const uint8_t player_index)
 
 void Controller::SetTriggerEffects(uint8_t type_left, const uint8_t *data_left, uint8_t type_right, const uint8_t *data_right)
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+	{
+		Ds5BtManager::instance().setTriggerEffects(type_left, data_left, type_right, data_right, manager->GetDualSenseIntensity());
+		return;
+	}
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if((!is_dualsense && !is_dualsense_edge) || !controller)
 		return;
@@ -887,6 +1083,14 @@ void Controller::SetTriggerEffects(uint8_t type_left, const uint8_t *data_left, 
 
 void Controller::SetDualsenseMic(bool on)
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+	{
+		// Note: in Chiaki/PS5Link, SetDualsenseMic(muted) passes true when muted (orange LED on).
+		Ds5BtManager::instance().setMicState(Ds5BtManager::instance().isMicStreamActive(), on);
+		return;
+	}
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if((!is_dualsense && !is_dualsense_edge) || !controller)
 		return;
@@ -909,6 +1113,13 @@ void Controller::SetDualsenseMic(bool on)
 
 void Controller::SetHapticRumble(uint16_t left, uint16_t right)
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+	{
+		Ds5BtManager::instance().setRumble(left >> 8, right >> 8, manager->GetDualSenseIntensity());
+		return;
+	}
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return;
@@ -921,6 +1132,10 @@ void Controller::SetHapticRumble(uint16_t left, uint16_t right)
 
 bool Controller::IsDualSense()
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+		return is_dualsense;
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return false;
@@ -931,6 +1146,10 @@ bool Controller::IsDualSense()
 
 bool Controller::IsDualSenseEdge()
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+		return is_dualsense_edge;
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return false;
@@ -971,6 +1190,14 @@ bool Controller::IsSteamVirtualUnmasked()
 
 void Controller::resetMotionControls()
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(is_native_bt)
+	{
+		Ds5BtManager::instance().resetMotion();
+		state = Ds5BtManager::instance().getControllerState();
+		return;
+	}
+#endif
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return;

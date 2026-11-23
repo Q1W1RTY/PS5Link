@@ -1,0 +1,304 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="PS5Link.Launcher.MainWindow"
+        Title="PS5Link" Icon="avares://PS5LinkLauncher/Assets/PS5Link.ico"
+        Width="468" SizeToContent="Height" CanResize="False" WindowStartupLocation="CenterScreen"
+        WindowDecorations="None" TransparencyLevelHint="Transparent" Background="Transparent"
+        FontFamily="avares://PS5LinkLauncher/Assets/Fonts#Geologica" FontSize="13">
+  <Window.Resources>
+    <SolidColorBrush x:Key="ShellBrush">#18181B</SolidColorBrush>
+    <SolidColorBrush x:Key="CardBrush">#0EFFFFFF</SolidColorBrush>
+    <SolidColorBrush x:Key="StrokeBrush">#17FFFFFF</SolidColorBrush>
+    <SolidColorBrush x:Key="MutedBrush">#B3B3BA</SolidColorBrush>
+    <SolidColorBrush x:Key="AccentBrush">#0A84FF</SolidColorBrush>
+    <SolidColorBrush x:Key="SuccessBrush">#30D158</SolidColorBrush>
+  </Window.Resources>
+  <Window.Styles>
+    <Style Selector="Border.card">
+      <Setter Property="Background" Value="{DynamicResource CardBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource StrokeBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="20" />
+      <Setter Property="Padding" Value="14,10" />
+    </Style>
+    <Style Selector="TextBlock.muted">
+      <Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
+      <Setter Property="FontSize" Value="11" />
+    </Style>
+    <Style Selector="Expander.category">
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="Background" Value="{DynamicResource CardBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource StrokeBrush}" />
+      <Setter Property="CornerRadius" Value="18" />
+      <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+    <Style Selector="Button">
+      <Setter Property="CornerRadius" Value="18" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="Background" Value="{DynamicResource CardBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource StrokeBrush}" />
+      <Setter Property="Height" Value="35" />
+      <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+    <Style Selector="Button.primary">
+      <Setter Property="Background" Value="{DynamicResource AccentBrush}" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.preset">
+      <Setter Property="Height" Value="31" />
+      <Setter Property="CornerRadius" Value="15" />
+      <Setter Property="Padding" Value="10,0" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+    </Style>
+    <Style Selector="Button.preset.active">
+      <Setter Property="Background" Value="#293A51" />
+      <Setter Property="BorderBrush" Value="#477CB0" />
+      <Setter Property="Foreground" Value="#E2F0FF" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.chrome">
+      <Setter Property="Height" Value="27" />
+      <Setter Property="MinWidth" Value="28" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="7,0" />
+    </Style>
+    <Style Selector="ComboBox">
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="MinHeight" Value="30" />
+      <Setter Property="CornerRadius" Value="15" />
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="ToggleSwitch">
+      <Setter Property="OnContent" Value="" />
+      <Setter Property="OffContent" Value="" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="Padding" Value="0" />
+    </Style>
+    <Style Selector=":is(Control).settingHelp">
+      <Setter Property="ToolTip.ShowDelay" Value="550" />
+      <Setter Property="ToolTip.BetweenShowDelay" Value="-1" />
+      <Setter Property="ToolTip.ShowOnDisabled" Value="True" />
+    </Style>
+  </Window.Styles>
+
+  <Border Margin="6" CornerRadius="28" BorderThickness="1" Padding="15,9,15,11"
+          Background="{DynamicResource ShellBrush}" BorderBrush="{DynamicResource StrokeBrush}">
+    <ScrollViewer x:Name="Viewport" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+      <StackPanel Spacing="7">
+        <Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="3">
+          <Border Background="Transparent" PointerPressed="DragTitle">
+            <TextBlock Text="PS5Link" FontWeight="Bold" VerticalAlignment="Center" Margin="3,0,0,0" />
+          </Border>
+          <Button x:Name="LanguageButton" Grid.Column="1" Classes="chrome" FontSize="11"
+                  AutomationProperties.Name="{DynamicResource LangLanguage}" ToolTip.Tip="{DynamicResource LangLanguage}" Click="ToggleLanguage" />
+          <Button Grid.Column="2" Classes="chrome" Content="−" AutomationProperties.Name="{DynamicResource LangMinimize}" Click="MinimizeWindow" />
+          <Button Grid.Column="3" Classes="chrome" Content="×" AutomationProperties.Name="{DynamicResource LangClose}" Click="CloseWindow" />
+        </Grid>
+
+        <Border Classes="card" PointerPressed="DragTitle">
+          <Grid ColumnDefinitions="114,*" ColumnSpacing="13">
+            <Border Height="52" Background="#1AFFFFFF" BorderBrush="{DynamicResource StrokeBrush}"
+                    BorderThickness="1" CornerRadius="14">
+              <Image Source="avares://PS5LinkLauncher/Assets/PS5-console.png" Width="100"
+                     Stretch="Uniform" RenderOptions.BitmapInterpolationMode="HighQuality" />
+            </Border>
+            <StackPanel Grid.Column="1" Spacing="6" VerticalAlignment="Center">
+              <Border HorizontalAlignment="Left" Background="#15FFFFFF" Padding="8,3" CornerRadius="10">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <Ellipse x:Name="StatusDot" Width="6" Height="6" Fill="{DynamicResource SuccessBrush}" VerticalAlignment="Center" />
+                  <TextBlock x:Name="StatusText" FontSize="11" TextWrapping="Wrap" />
+                </StackPanel>
+              </Border>
+              <WrapPanel Orientation="Horizontal">
+                <TextBlock x:Name="RendererText" FontWeight="SemiBold" Margin="0,0,8,0" VerticalAlignment="Center" />
+                <TextBlock x:Name="ScalingText" Classes="muted" TextWrapping="Wrap" VerticalAlignment="Center" />
+              </WrapPanel>
+            </StackPanel>
+          </Grid>
+        </Border>
+
+        <StackPanel Spacing="6">
+          <Button x:Name="Start" Classes="primary" Content="{DynamicResource LangConnect}" Width="252" Height="40" CornerRadius="20"
+                  FontSize="14" HorizontalAlignment="Center" Click="StartClient" />
+          <Grid ColumnDefinitions="*,*" ColumnSpacing="6">
+            <Button x:Name="RtxPreset" Classes="preset" Content="{DynamicResource LangRtxPreset}"
+                    ToolTip.Tip="{DynamicResource LangRtxPresetTip}" Click="SelectRtxPreset" />
+            <Button x:Name="StandardPreset" Grid.Column="1" Classes="preset" Content="{DynamicResource LangStandardPreset}"
+                    ToolTip.Tip="{DynamicResource LangStandardPresetTip}" Click="SelectStandardPreset" />
+          </Grid>
+        </StackPanel>
+
+        <Expander Classes="category" Header="{DynamicResource LangVideoCategory}"
+                  AutomationProperties.Name="{DynamicResource LangVideoCategory}">
+          <StackPanel Margin="10,6" Spacing="6">
+            <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto"
+                  ColumnSpacing="12" RowSpacing="5">
+              <TextBlock Text="{DynamicResource LangTiming}" Classes="settingHelp"
+                         ToolTip.Tip="{DynamicResource LangTimingHelp}" VerticalAlignment="Center" />
+              <ComboBox x:Name="Timing" Grid.Column="1" SelectedIndex="0" AutomationProperties.Name="{DynamicResource LangTiming}"
+                         Classes="settingHelp" ToolTip.Tip="{DynamicResource LangTimingHelp}"
+                         AutomationProperties.HelpText="{DynamicResource LangTimingHelp}">
+                <ComboBoxItem Content="{DynamicResource LangBalanced}" /><ComboBoxItem Content="{DynamicResource LangLowLatency}" /><ComboBoxItem Content="VSync" />
+              </ComboBox>
+              <TextBlock Grid.Row="1" Text="{DynamicResource LangFrameGeneration}" Classes="settingHelp"
+                         ToolTip.Tip="{DynamicResource LangFrameGenerationHelp}" VerticalAlignment="Center" />
+              <ComboBox x:Name="Generator" Grid.Row="1" Grid.Column="1" SelectedIndex="0" AutomationProperties.Name="{DynamicResource LangFrameGeneration}"
+                         Classes="settingHelp" ToolTip.Tip="{DynamicResource LangFrameGenerationHelp}"
+                         AutomationProperties.HelpText="{DynamicResource LangFrameGenerationHelp}">
+                <ComboBoxItem Content="{DynamicResource LangOff}" /><ComboBoxItem Content="{DynamicResource LangInterpolation}" />
+                <ComboBoxItem Content="NVIDIA DLSS FG ×2" /><ComboBoxItem Content="AMD FSR 3.1 FG ×2" />
+              </ComboBox>
+              <TextBlock Grid.Row="2" Text="{DynamicResource LangUpscaling}" Classes="settingHelp"
+                         ToolTip.Tip="{DynamicResource LangUpscalingHelp}" VerticalAlignment="Center" />
+              <ComboBox x:Name="Upscale" Grid.Row="2" Grid.Column="1" SelectedIndex="3" AutomationProperties.Name="{DynamicResource LangUpscaling}"
+                         Classes="settingHelp" ToolTip.Tip="{DynamicResource LangUpscalingHelp}"
+                         AutomationProperties.HelpText="{DynamicResource LangUpscalingHelp}">
+                <ComboBoxItem Content="{DynamicResource LangDefault}" /><ComboBoxItem Content="AMD FSR 1.0 (EASU)" />
+                <ComboBoxItem Content="RTX VSR Low" /><ComboBoxItem Content="RTX VSR Medium" /><ComboBoxItem Content="RTX VSR High" />
+                <ComboBoxItem Content="RTX VSR Ultra" /><ComboBoxItem Content="DLSS 4 SR" /><ComboBoxItem Content="DLSS 4.5 SR" />
+              </ComboBox>
+              <TextBlock Grid.Row="3" Text="{DynamicResource LangResolution}" Classes="settingHelp"
+                         ToolTip.Tip="{DynamicResource LangResolutionHelp}" VerticalAlignment="Center" />
+              <ComboBox x:Name="Target" Grid.Row="3" Grid.Column="1" SelectedIndex="0" AutomationProperties.Name="{DynamicResource LangResolution}"
+                         Classes="settingHelp" ToolTip.Tip="{DynamicResource LangResolutionHelp}"
+                         AutomationProperties.HelpText="{DynamicResource LangResolutionHelp}">
+                <ComboBoxItem Content="{DynamicResource LangOutputSize}" /><ComboBoxItem Content="{DynamicResource LangStreamSize}" />
+                <ComboBoxItem Content="{DynamicResource LangTarget1800}" /><ComboBoxItem Content="{DynamicResource LangTarget4K}" />
+              </ComboBox>
+            </Grid>
+
+            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto" ColumnSpacing="12" RowSpacing="4">
+              <TextBlock Text="Direct3D 12" Classes="settingHelp" TextWrapping="Wrap"
+                         ToolTip.Tip="{DynamicResource LangDx12Help}" VerticalAlignment="Center" />
+              <ToggleSwitch x:Name="Dx12" Grid.Column="1" HorizontalAlignment="Right"
+                            IsChecked="True" AutomationProperties.Name="Direct3D 12"
+                            Classes="settingHelp" ToolTip.Tip="{DynamicResource LangDx12Help}"
+                            AutomationProperties.HelpText="{DynamicResource LangDx12Help}" />
+            </Grid>
+          </StackPanel>
+        </Expander>
+
+        <Expander Classes="category" Header="{DynamicResource LangNetworkCategory}"
+                  AutomationProperties.Name="{DynamicResource LangNetworkCategory}">
+          <StackPanel Margin="10,6" Spacing="5">
+            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+              <TextBlock Text="{DynamicResource LangPacketBuffer}" Classes="settingHelp"
+                         ToolTip.Tip="{DynamicResource LangPacketBufferHelp}" VerticalAlignment="Center" />
+              <ComboBox x:Name="Buffer" Grid.Column="1" SelectedIndex="1" AutomationProperties.Name="{DynamicResource LangPacketBuffer}"
+                         Classes="settingHelp" ToolTip.Tip="{DynamicResource LangPacketBufferHelp}"
+                         AutomationProperties.HelpText="{DynamicResource LangPacketBufferHelp}">
+                <ComboBoxItem Content="{DynamicResource LangBuffer0}" /><ComboBoxItem Content="{DynamicResource LangBuffer8}" /><ComboBoxItem Content="{DynamicResource LangBuffer16}" />
+              </ComboBox>
+            </Grid>
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+              <TextBlock Text="{DynamicResource LangIdr}" Classes="settingHelp" TextWrapping="Wrap"
+                         ToolTip.Tip="{DynamicResource LangIdrHelp}" VerticalAlignment="Center" />
+              <ToggleSwitch x:Name="Recover" Grid.Column="1" IsChecked="True" HorizontalAlignment="Right"
+                            AutomationProperties.Name="{DynamicResource LangKeyframe}"
+                            Classes="settingHelp" ToolTip.Tip="{DynamicResource LangIdrHelp}"
+                            AutomationProperties.HelpText="{DynamicResource LangIdrHelp}" />
+            </Grid>
+          </StackPanel>
+        </Expander>
+
+        <Expander Classes="category" Header="{DynamicResource LangGamepadHeader}"
+                  AutomationProperties.Name="{DynamicResource LangGamepadHeader}">
+          <StackPanel Margin="10,6" Spacing="5">
+            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto"
+                  ColumnSpacing="12" RowSpacing="4">
+              <TextBlock Text="{DynamicResource LangAdaptiveTriggers}" Classes="settingHelp" TextWrapping="Wrap"
+                         ToolTip.Tip="{DynamicResource LangAdaptiveTriggersHelp}" VerticalAlignment="Center" />
+              <ToggleSwitch x:Name="AdaptiveTriggers" Grid.Column="1" IsChecked="True" HorizontalAlignment="Right"
+                            AutomationProperties.Name="{DynamicResource LangAdaptiveTriggers}"
+                            Classes="settingHelp" ToolTip.Tip="{DynamicResource LangAdaptiveTriggersHelp}"
+                            AutomationProperties.HelpText="{DynamicResource LangAdaptiveTriggersHelp}" />
+
+              <TextBlock Grid.Row="1" Text="{DynamicResource LangHaptics}" Classes="settingHelp" TextWrapping="Wrap"
+                         ToolTip.Tip="{DynamicResource LangHapticsHelp}" VerticalAlignment="Center" />
+              <ToggleSwitch x:Name="Haptics" Grid.Row="1" Grid.Column="1" IsChecked="True" HorizontalAlignment="Right"
+                            AutomationProperties.Name="{DynamicResource LangHaptics}"
+                            Classes="settingHelp" ToolTip.Tip="{DynamicResource LangHapticsHelp}"
+                            AutomationProperties.HelpText="{DynamicResource LangHapticsHelp}" />
+
+              <TextBlock Grid.Row="2" Text="{DynamicResource LangBtSpeaker}" Classes="settingHelp" TextWrapping="Wrap"
+                         ToolTip.Tip="{DynamicResource LangBtSpeakerHelp}" VerticalAlignment="Center" />
+              <ToggleSwitch x:Name="BtSpeaker" Grid.Row="2" Grid.Column="1" IsChecked="False" HorizontalAlignment="Right"
+                            AutomationProperties.Name="{DynamicResource LangBtSpeaker}"
+                            Classes="settingHelp" ToolTip.Tip="{DynamicResource LangBtSpeakerHelp}"
+                            AutomationProperties.HelpText="{DynamicResource LangBtSpeakerHelp}" />
+
+              <TextBlock Grid.Row="3" Text="{DynamicResource LangMicUnmuted}" Classes="settingHelp" TextWrapping="Wrap"
+                         ToolTip.Tip="{DynamicResource LangMicUnmutedHelp}" VerticalAlignment="Center" />
+              <ToggleSwitch x:Name="MicUnmuted" Grid.Row="3" Grid.Column="1" IsChecked="False" HorizontalAlignment="Right"
+                            AutomationProperties.Name="{DynamicResource LangMicUnmuted}"
+                            Classes="settingHelp" ToolTip.Tip="{DynamicResource LangMicUnmutedHelp}"
+                            AutomationProperties.HelpText="{DynamicResource LangMicUnmutedHelp}" />
+            </Grid>
+
+            <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto"
+                  ColumnSpacing="12" RowSpacing="5">
+              <TextBlock Text="{DynamicResource LangLightbar}" Classes="settingHelp"
+                         ToolTip.Tip="{DynamicResource LangLightbarHelp}" VerticalAlignment="Center" />
+              <ComboBox x:Name="Lightbar" Grid.Column="1" SelectedIndex="0"
+                        AutomationProperties.Name="{DynamicResource LangLightbar}"
+                        Classes="settingHelp" ToolTip.Tip="{DynamicResource LangLightbarHelp}"
+                        AutomationProperties.HelpText="{DynamicResource LangLightbarHelp}">
+                <ComboBoxItem Content="{DynamicResource LangLightbarPad}" />
+                <ComboBoxItem Content="{DynamicResource LangLightbarBoth}" />
+                <ComboBoxItem Content="{DynamicResource LangLightbarScreen}" />
+                <ComboBoxItem Content="{DynamicResource LangLightbarOff}" />
+              </ComboBox>
+
+              <TextBlock Grid.Row="1" Text="{DynamicResource LangPolling}" Classes="settingHelp"
+                         ToolTip.Tip="{DynamicResource LangPollingHelp}" VerticalAlignment="Center" />
+              <ComboBox x:Name="Polling" Grid.Row="1" Grid.Column="1" SelectedIndex="2"
+                        AutomationProperties.Name="{DynamicResource LangPolling}"
+                        Classes="settingHelp" ToolTip.Tip="{DynamicResource LangPollingHelp}"
+                        AutomationProperties.HelpText="{DynamicResource LangPollingHelp}">
+                <ComboBoxItem Content="{DynamicResource LangPoll1}" />
+                <ComboBoxItem Content="{DynamicResource LangPoll2}" />
+                <ComboBoxItem Content="{DynamicResource LangPoll4}" />
+                <ComboBoxItem Content="{DynamicResource LangPoll8}" />
+              </ComboBox>
+            </Grid>
+          </StackPanel>
+        </Expander>
+
+        <Expander Classes="category" Header="{DynamicResource LangAppearanceCategory}"
+                  AutomationProperties.Name="{DynamicResource LangAppearanceCategory}">
+          <StackPanel Margin="10,6" Spacing="4">
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Text="{DynamicResource LangOpacity}" Classes="settingHelp"
+                       ToolTip.Tip="{DynamicResource LangOpacityHelp}" VerticalAlignment="Center" />
+              <TextBlock x:Name="OpacityLabel" Grid.Column="1" Classes="muted" VerticalAlignment="Center" />
+            </Grid>
+            <Slider x:Name="WindowOpacity" Minimum="75" Maximum="100" Value="94"
+                    TickFrequency="1" IsSnapToTickEnabled="True" AutomationProperties.Name="{DynamicResource LangOpacity}"
+                       Classes="settingHelp" ToolTip.Tip="{DynamicResource LangOpacityHelp}"
+                       AutomationProperties.HelpText="{DynamicResource LangOpacityHelp}" />
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Text="{DynamicResource LangGradientTheme}" Classes="settingHelp" TextWrapping="Wrap"
+                       ToolTip.Tip="{DynamicResource LangGradientHelp}" VerticalAlignment="Center" />
+              <ToggleSwitch x:Name="GradientTheme" Grid.Column="1" IsCheckedChanged="ChangeTheme"
+                            AutomationProperties.Name="{DynamicResource LangGradientTheme}"
+                       Classes="settingHelp" ToolTip.Tip="{DynamicResource LangGradientHelp}"
+                       AutomationProperties.HelpText="{DynamicResource LangGradientHelp}" />
+            </Grid>
+          </StackPanel>
+        </Expander>
+
+        <Button x:Name="Advanced" Content="{DynamicResource LangAdvancedSettings}" HorizontalAlignment="Stretch"
+                ToolTip.Tip="{DynamicResource LangAdvancedSettingsTip}" Click="OpenAdvanced" />
+        <Grid ColumnDefinitions="*,Auto" Margin="3,0">
+          <TextBlock Classes="muted" Text="{DynamicResource LangOverlayHint}" TextWrapping="Wrap" />
+          <TextBlock Grid.Column="1" Classes="muted" Text="v1.10.1" VerticalAlignment="Center" />
+        </Grid>
+      </StackPanel>
+    </ScrollViewer>
+  </Border>
+</Window>

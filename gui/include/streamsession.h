@@ -158,6 +158,7 @@ class StreamSession : public QObject
 	Q_PROPERTY(double averagePacketLoss READ GetAveragePacketLoss NOTIFY AveragePacketLossChanged)
 	Q_PROPERTY(bool muted READ GetMuted WRITE SetMuted NOTIFY MutedChanged)
 	Q_PROPERTY(bool cantDisplay READ GetCantDisplay NOTIFY CantDisplayChanged)
+	Q_PROPERTY(QString recoveryStats READ GetRecoveryStats NOTIFY RecoveryStatsChanged)
 	Q_PROPERTY(int framesLost READ GetFramesLost NOTIFY FramesLostChanged)
 
 	private:
@@ -182,6 +183,18 @@ class StreamSession : public QObject
 		double average_packet_loss = 0;
 		int32_t frames_lost = 0;
 		int32_t pending_frames_lost = 0;
+		QString recovery_stats;
+#ifdef PS5LINK_BUILD
+        QAtomicInteger<quint64> decoder_corrupt_frames{0};
+        quint64 bitrate_window_start_ms = 0;
+        quint64 bitrate_window_start_bytes = 0;
+        double rtt_ms = 0.0;
+        QAtomicInteger<bool> enable_rumble{true};
+        QAtomicInteger<bool> enable_adaptive_triggers{true};
+        QAtomicInteger<bool> enable_gyro_reset{true};
+        QAtomicInteger<int> lightbar_mode{1}; // 0=Off, 1=Controller, 2=Overlay, 3=Both
+        QAtomicInteger<quint32> lightbar_rgb{0x000040ffu};
+#endif
 		double packet_loss_max = 0;
 		QList<double> packet_loss_history;
 		QAtomicInteger<quint64> decoder_flush_generation{0};
@@ -351,6 +364,17 @@ class StreamSession : public QObject
 		double GetMeasuredBitrate()	{ return measured_bitrate; }
 		double GetAveragePacketLoss()	{ return average_packet_loss; }
 		quint64 DecoderFlushGeneration() const { return decoder_flush_generation.loadRelaxed(); }
+#ifdef PS5LINK_BUILD
+        void RecordCorruptDecodedFrame() { decoder_corrupt_frames.fetchAndAddRelaxed(1); }
+        quint64 GetCorruptDecodedFrames() const { return decoder_corrupt_frames.loadRelaxed(); }
+        double GetRttMs() const { return rtt_ms; }
+        quint32 GetLightbarRgb() const { return lightbar_rgb.loadRelaxed(); }
+        int GetLightbarMode() const { return lightbar_mode.loadRelaxed(); }
+        void SyncLiveSettings(bool rumble, bool adaptiveTriggers, bool gyroReset, int lightbarMode);
+        void ResetGyro();
+#endif
+		QString GetRecoveryStats() const { return recovery_stats; }
+		bool HoldCorruptFrames() const { return session.connect_info.enable_idr_on_fec_failure; }
 		int GetFramesLost()		{ return frames_lost; }
 		bool GetMuted()	{ return muted; }
 		void SetMuted(bool enable)	{ if (enable != muted) ToggleMute(); }
@@ -371,6 +395,9 @@ class StreamSession : public QObject
 		void HandleMouseReleaseEvent(QMouseEvent *event);
 		void HandleMousePressEvent(QMouseEvent *event);
 		void HandleMouseMoveEvent(QMouseEvent *event, qreal width, qreal height);
+		void HandleNormalizedTouchpad(int action, float normX, float normY, bool clickButton);
+		bool GetKeyboardControllerEnabled() const { return keyboard_controller_enabled; }
+		void SetKeyboardControllerEnabled(bool enabled);
 #if CHIAKI_GUI_ENABLE_SPEEX
 		bool ProcessMicFrame(int16_t *echo_buf);
 #endif
@@ -396,6 +423,7 @@ class StreamSession : public QObject
 		void MeasuredBitrateChanged();
 		void AveragePacketLossChanged();
 		void FramesLostChanged();
+		void RecoveryStatsChanged();
 		void MutedChanged();
 		void CantDisplayChanged(bool cant_display);
 		void FecFailure();

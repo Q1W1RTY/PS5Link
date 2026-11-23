@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include "streamsession.h"
 #include "discoverymanager.h"
 #include "qmlmainwindow.h"
@@ -111,6 +113,8 @@ public:
         ConnectFailedConsoleUnreachable,
     };
     Q_ENUM(PsnConnectState);
+    enum class QuickConnectResult { Waiting, Started, ChooseConsole };
+    Q_ENUM(QuickConnectResult)
     QmlBackend(Settings *settings, QmlMainWindow *window);
     ~QmlBackend();
 
@@ -177,6 +181,16 @@ public:
 
     void goToSleep();
 
+#ifdef PS5LINK_BUILD
+    struct FrameCounts { quint64 decoded = 0, submitted = 0, generated = 0; };
+    FrameCounts frameCounts() const;
+    unsigned dx12PresentedFrames() const;
+    unsigned dx12DlssGeneratedFrames() const;
+    bool hasDx12Output() const { return dx12_output != nullptr; }
+    void activateDx12Output();
+    bool toggleDx12Menu();
+    bool psnScanInProgress() const { return updating_psn_hosts; }
+#endif
     bool zeroCopy()        { return !disable_zero_copy; };
     void disableZeroCopy() { disable_zero_copy = true; };
     void enableZeroCopy()  { disable_zero_copy = false; };
@@ -187,6 +201,7 @@ public:
     Q_INVOKABLE void hideHost(const QString &mac_string, const QString &host_nickname);
     Q_INVOKABLE void unhideHost(const QString &mac_string);
     Q_INVOKABLE bool registerHost(const QString &host, const QString &psn_id, const QString &pin, const QString &cpin, bool broadcast, int target, const QJSValue &callback);
+    Q_INVOKABLE QuickConnectResult tryQuickConnect();
     Q_INVOKABLE void connectToHost(int index, QString nickname = QString());
     Q_INVOKABLE void stopSession(bool sleep);
     Q_INVOKABLE void sessionGoHome();
@@ -269,6 +284,7 @@ private:
     };
 
     DisplayServer displayServerAt(int index) const;
+    void connectToServer(const DisplayServer &server, QString nickname);
     bool sendWakeup(const DisplayServer &server);
     bool sendWakeup(const QString &host, const QByteArray &regist_key, bool ps5);
     void updateControllers();
@@ -295,6 +311,11 @@ private:
     int psn_reconnect_tries = 0;
     QThread psn_connection_thread;
     PsnConnectState psn_connect_state;
+#ifdef PS5LINK_BUILD
+    std::unique_ptr<class Dx12ReplayWindow> dx12_output;
+    QAtomicInteger<int> dx12_frame_gap{0};
+    QAtomicInteger<quint64> decoded_frames{0};
+#endif
     DiscoveryManager discovery_manager;
     QList<QString> waking_sleeping_nicknames;
     QHash<int, QmlController*> controllers;
@@ -331,6 +352,7 @@ private:
     bool enable_analog_stick_mapping = false;
     bool resume_session = false;
     bool settings_allocd = false;
+    bool suppress_profile_auto_connect = false;
     HostMAC auto_connect_mac = {};
     QString auto_connect_nickname = "";
     QString wakeup_nickname = "";

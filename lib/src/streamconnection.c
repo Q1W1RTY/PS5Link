@@ -93,6 +93,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_init(ChiakiStreamConnecti
 	stream_connection->video_receiver = NULL;
 	stream_connection->audio_receiver = NULL;
 	stream_connection->haptics_receiver = NULL;
+	stream_connection->takion.send_buffer.rtt_us = 0;
 
 	err = chiaki_mutex_init(&stream_connection->feedback_sender_mutex, false);
 	if(err != CHIAKI_ERR_SUCCESS)
@@ -147,10 +148,11 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_run(ChiakiStreamConnectio
 	ChiakiSession *session = stream_connection->session;
 	ChiakiErrorCode err;
 
-	ChiakiTakionConnectInfo takion_info;
+	ChiakiTakionConnectInfo takion_info = { 0 };
 	takion_info.log = stream_connection->log;
 	takion_info.disable_audio_video = stream_connection->session->connect_info.disable_audio_video;
 	takion_info.close_socket = true;
+	takion_info.bypass_video_reorder_queue = session->connect_info.video_reorder_window_ms > 0;
 	if(!socket)
 	{
 		takion_info.sa_len = session->connect_info.host_addrinfo_selected->ai_addrlen;

@@ -5,6 +5,7 @@
     <file>MainView.qml</file>
     <file>StreamView.qml</file>
     <file>StreamMenuWindow.qml</file>
+    <file>QuickStreamPanel.qml</file>
     <file>ConfirmDialog.qml</file>
     <file>RemindDialog.qml</file>
     <file>DialogView.qml</file>
@@ -28,5 +29,12 @@
     <file>controls/RadioButton.qml</file>
     <file>controls/Slider.qml</file>
     <file>controls/TextField.qml</file>
+  </qresource>
+  <qresource prefix="/ps5link">
+    <file alias="ru.json">../../assets/ps5link/ru.json</file>
+    <file alias="Geologica-Regular.ttf">../../assets/ps5link/Geologica-Regular.ttf</file>
+    <file alias="Geologica-SemiBold.ttf">../../assets/ps5link/Geologica-SemiBold.ttf</file>
+    <file alias="Geologica-OFL.txt">../../assets/ps5link/Geologica-OFL.txt</file>
+    <file alias="PS5Link.png">../../assets/ps5link/PS5Link.png</file>
   </qresource>
 </RCC>

@@ -1,0 +1,19 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="PS5Link.Launcher.App">
+  <Application.Styles>
+    <FluentTheme>
+      <FluentTheme.Palettes>
+        <ColorPaletteResources x:Key="Dark" Accent="#0A84FF" />
+      </FluentTheme.Palettes>
+    </FluentTheme>
+    <Style Selector="ToolTip">
+      <Setter Property="ContentTemplate">
+        <DataTemplate>
+          <TextBlock Text="{Binding}" MaxWidth="306" TextWrapping="Wrap" LineHeight="17"
+                     FontFamily="avares://PS5LinkLauncher/Assets/Fonts#Geologica" FontSize="12" />
+        </DataTemplate>
+      </Setter>
+    </Style>
+  </Application.Styles>
+</Application>

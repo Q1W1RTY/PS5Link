@@ -35,6 +35,7 @@ typedef struct chiaki_takion_send_buffer_t
 	ChiakiCond cond;
 	bool should_stop;
 	ChiakiThread thread;
+	uint64_t rtt_us;
 } ChiakiTakionSendBuffer;
 
 
@@ -57,6 +58,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_buffer_push(ChiakiTakionSendBuf
  * @param acked_seq_nums optional array of size of at least send_buffer->packets_size where acked seq nums will be stored
  */
 CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_buffer_ack(ChiakiTakionSendBuffer *send_buffer, ChiakiSeqNum32 seq_num, ChiakiSeqNum32 *acked_seq_nums, size_t *acked_seq_nums_count);
+CHIAKI_EXPORT uint64_t chiaki_takion_send_buffer_get_rtt_us(ChiakiTakionSendBuffer *send_buffer);
 
 #ifdef __cplusplus
 }

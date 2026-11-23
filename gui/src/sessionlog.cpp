@@ -166,6 +166,13 @@ static const QRegularExpression &sanitize_session_id_eq_re()
 		R"((session\s+id\s*=\s*)([^\s,;]+))", QRegularExpression::CaseInsensitiveOption);
 	return *re;
 }
+static const QRegularExpression &sanitize_secret_field_re()
+{
+	static const auto *re = new QRegularExpression(
+		R"(((?:\\*["'])?(?:skey|rp_key|rp_regist_key|ap_key|session_key|handshake_key|access_token|refresh_token|auth_token|customData1|deviceUniqueId|onlineId)(?:\\*["'])?\s*[:=]\s*(?:\\*["'])?)([^\\,\s;'"}\]]+))",
+		QRegularExpression::CaseInsensitiveOption);
+	return *re;
+}
 
 static QString SanitizeLogMessage(const QString &msg)
 {
@@ -178,6 +185,7 @@ static QString SanitizeLogMessage(const QString &msg)
 	sanitized.replace(sanitize_duid_re(), QStringLiteral("\\1<redacted>"));
 	sanitized.replace(sanitize_session_id_eq_re(), QStringLiteral("\\1<redacted>"));
 	sanitized.replace(sanitize_session_id_token_re(), QStringLiteral("\\1<redacted>"));
+	sanitized.replace(sanitize_secret_field_re(), QStringLiteral("\\1<redacted>"));
 	sanitized.replace(sanitize_uuid_re(), QStringLiteral("<redacted-uuid>"));
 
 	// Catch unlabeled long hex identifiers, which commonly occur in console IDs and device UIDs.

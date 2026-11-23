@@ -40,3 +40,14 @@ target_link_libraries(chiaki-unit chiaki-lib munit)
 if(CHIAKI_ENABLE_FFMPEG_DECODER)
 	target_link_libraries(chiaki-unit FFMPEG::avcodec FFMPEG::avutil)
 endif()
+
+# Link-time feedback stubs keep the receiver tests entirely offline.
+if(PS5LINK_BUILD AND MINGW)
+    add_executable(ps5link-receiver-test videoreceiver.c)
+    target_link_libraries(ps5link-receiver-test chiaki-lib munit)
+    target_link_options(ps5link-receiver-test PRIVATE
+        "-Wl,--wrap=stream_connection_send_corrupt_frame"
+        "-Wl,--wrap=stream_connection_send_idr_request"
+        "-Wl,--wrap=chiaki_time_now_monotonic_us")
+    add_test(NAME ps5link-receiver COMMAND ps5link-receiver-test)
+endif()

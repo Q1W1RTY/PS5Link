@@ -56,10 +56,15 @@ set(SOURCE_FILES
 	src/systemdinhibit.cpp
 	)
 set(RESOURCE_FILES "")
+option(PS5LINK_BUILD "Build the isolated PS5Link Windows client" OFF)
 
 if(APPLE)
 	list(APPEND RESOURCE_FILES "chiaking.icns")
 elseif(WIN32)
+	set(CHIAKI_WINDOWS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/chiaking.ico")
+	if(PS5LINK_BUILD)
+		set(CHIAKI_WINDOWS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/ps5link/PS5Link.ico")
+	endif()
 	configure_file(
 		${CMAKE_CURRENT_SOURCE_DIR}/chiaking.rc.in
 		${CMAKE_CURRENT_SOURCE_DIR}/chiaking.rc
@@ -93,6 +98,30 @@ add_executable(chiaki WIN32
 		${SOURCE_FILES}
 )
 target_include_directories(chiaki PRIVATE include)
+
+if(PS5LINK_BUILD)
+    if(NOT WIN32)
+        message(FATAL_ERROR "PS5Link requires Windows")
+    endif()
+    target_compile_definitions(chiaki PRIVATE PS5LINK_BUILD)
+    target_sources(chiaki PRIVATE include/dx12replay.h include/ds5bt.h src/ps5link.cpp src/ps5linklocale.cpp src/rtxvsr.cpp src/dx12replay.cpp src/ds5bt.cpp)
+    include(FetchContent)
+    FetchContent_Declare(ps5link_imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG f5befd2d29e66809cd1110a152e375a7f1981f06
+    )
+    FetchContent_MakeAvailable(ps5link_imgui)
+    target_sources(chiaki PRIVATE
+        ${ps5link_imgui_SOURCE_DIR}/imgui.cpp
+        ${ps5link_imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${ps5link_imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${ps5link_imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${ps5link_imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp
+    )
+    target_include_directories(chiaki PRIVATE ${ps5link_imgui_SOURCE_DIR} ${Opus_INCLUDE_DIRS})
+    target_link_libraries(chiaki crypt32 vulkan-1 d3d12 dxgi d3dcompiler avrt winmm setupapi hid cfgmgr32 ${Opus_LIBRARIES})
+    set_target_properties(chiaki PROPERTIES OUTPUT_NAME PS5Link)
+endif()
 
 add_library(placebo-libav-impl src/libav_impl.c)
 target_link_libraries(placebo-libav-impl PkgConfig::LIBPLACEBO FFMPEG::avcodec FFMPEG::avutil FFMPEG::avformat)

@@ -31,6 +31,30 @@ class QmlSettings : public QObject
     Q_PROPERTY(int echoSuppressLevel READ echoSuppressLevel WRITE setEchoSuppressLevel NOTIFY echoSuppressLevelChanged)
 #endif
     Q_PROPERTY(bool showStreamStats READ showStreamStats WRITE setShowStreamStats NOTIFY showStreamStatsChanged)
+#ifdef PS5LINK_BUILD
+    Q_PROPERTY(bool dx12Enabled READ dx12Enabled WRITE setDx12Enabled NOTIFY dx12EnabledChanged)
+    Q_PROPERTY(int dx12FrameGeneration READ dx12FrameGeneration WRITE setDx12FrameGeneration NOTIFY dx12FrameGenerationChanged)
+    Q_PROPERTY(int dx12AmbientStyle READ dx12AmbientStyle WRITE setDx12AmbientStyle NOTIFY dx12AmbientStyleChanged)
+    Q_PROPERTY(bool dx12ErrorConcealment READ dx12ErrorConcealment WRITE setDx12ErrorConcealment NOTIFY dx12ErrorConcealmentChanged)
+    Q_PROPERTY(int dx12WindowMode READ dx12WindowMode WRITE setDx12WindowMode NOTIFY dx12WindowModeChanged)
+    Q_PROPERTY(int dx12TouchpadWidth READ dx12TouchpadWidth WRITE setDx12TouchpadWidth NOTIFY dx12TouchpadWidthChanged)
+    Q_PROPERTY(bool wifiStreamingMode READ wifiStreamingMode WRITE setWifiStreamingMode NOTIFY wifiStreamingModeChanged)
+    Q_PROPERTY(bool preventDisplaySleep READ preventDisplaySleep WRITE setPreventDisplaySleep NOTIFY preventDisplaySleepChanged)
+    Q_PROPERTY(int performanceMode READ performanceMode WRITE setPerformanceMode NOTIFY performanceModeChanged)
+    Q_PROPERTY(int controllerPollingMs READ controllerPollingMs WRITE setControllerPollingMs NOTIFY controllerPollingMsChanged)
+    Q_PROPERTY(bool gamepadQuitHotkey READ gamepadQuitHotkey WRITE setGamepadQuitHotkey NOTIFY gamepadQuitHotkeyChanged)
+    Q_PROPERTY(bool enableRumble READ enableRumble WRITE setEnableRumble NOTIFY enableRumbleChanged)
+    Q_PROPERTY(bool enableAdaptiveTriggers READ enableAdaptiveTriggers WRITE setEnableAdaptiveTriggers NOTIFY enableAdaptiveTriggersChanged)
+    Q_PROPERTY(bool enableGyroReset READ enableGyroReset WRITE setEnableGyroReset NOTIFY enableGyroResetChanged)
+    Q_PROPERTY(int lightbarMode READ lightbarMode WRITE setLightbarMode NOTIFY lightbarModeChanged)
+    Q_PROPERTY(int themeMode READ themeMode WRITE setThemeMode NOTIFY themeModeChanged)
+    Q_PROPERTY(bool volumeControlsSystem READ volumeControlsSystem WRITE setVolumeControlsSystem NOTIFY volumeControlsSystemChanged)
+    Q_PROPERTY(bool hideOnScreenControls READ hideOnScreenControls WRITE setHideOnScreenControls NOTIFY hideOnScreenControlsChanged)
+    Q_PROPERTY(bool showMicButton READ showMicButton WRITE setShowMicButton NOTIFY showMicButtonChanged)
+    Q_PROPERTY(bool showAspectButton READ showAspectButton WRITE setShowAspectButton NOTIFY showAspectButtonChanged)
+    Q_PROPERTY(bool showVolumeButtons READ showVolumeButtons WRITE setShowVolumeButtons NOTIFY showVolumeButtonsChanged)
+    Q_PROPERTY(bool alwaysRequestIdr READ alwaysRequestIdr WRITE setAlwaysRequestIdr NOTIFY alwaysRequestIdrChanged)
+#endif
     Q_PROPERTY(bool streamerMode READ streamerMode WRITE setStreamerMode NOTIFY streamerModeChanged)
     Q_PROPERTY(float hapticOverride READ hapticOverride WRITE setHapticOverride NOTIFY hapticOverrideChanged)
     Q_PROPERTY(int displayTargetContrast READ displayTargetContrast WRITE setDisplayTargetContrast NOTIFY displayTargetContrastChanged)
@@ -178,6 +202,87 @@ public:
     void setAudioVideoDisabled(int disabled);
 
     bool showStreamStats() const;
+#ifdef PS5LINK_BUILD
+    bool dx12Enabled() const;
+    void setDx12Enabled(bool enabled);
+    int dx12FrameGeneration() const;
+    void setDx12FrameGeneration(int mode);
+    int dx12DlssSr() const;
+    void setDx12DlssSr(int model);
+    int dx12PresentMode() const;
+    void setDx12PresentMode(int mode);
+    int dx12Aspect() const;
+    void setDx12Aspect(int aspect);
+    int dx12AmbientStyle() const;
+    void setDx12AmbientStyle(int style);
+    int dx12UpscaleHeight() const;
+    void setDx12UpscaleHeight(int height);
+    int dx12Sharpness() const;
+    void setDx12Sharpness(int sharpness);
+    bool dx12Fsr() const;
+    void setDx12Fsr(bool enabled);
+    bool dx12ErrorConcealment() const;
+    void setDx12ErrorConcealment(bool enabled);
+    int dx12WindowMode() const;
+    void setDx12WindowMode(int mode);
+    int dx12TouchpadWidth() const;
+    void setDx12TouchpadWidth(int percent);
+    bool wifiStreamingMode() const;
+    void setWifiStreamingMode(bool enabled);
+    bool preventDisplaySleep() const;
+    void setPreventDisplaySleep(bool enabled);
+    int performanceMode() const;
+    void setPerformanceMode(int mode);
+    int controllerPollingMs() const;
+    void setControllerPollingMs(int ms);
+    bool gamepadQuitHotkey() const;
+    void setGamepadQuitHotkey(bool enabled);
+    bool enableRumble() const;
+    void setEnableRumble(bool enabled);
+    bool enableAdaptiveTriggers() const;
+    void setEnableAdaptiveTriggers(bool enabled);
+    bool enableGyroReset() const;
+    void setEnableGyroReset(bool enabled);
+    int lightbarMode() const;
+    void setLightbarMode(int mode);
+    int themeMode() const;
+    void setThemeMode(int mode);
+    bool volumeControlsSystem() const;
+    void setVolumeControlsSystem(bool enabled);
+    bool hideOnScreenControls() const;
+    void setHideOnScreenControls(bool hide);
+    bool showMicButton() const;
+    void setShowMicButton(bool show);
+    bool showAspectButton() const;
+    void setShowAspectButton(bool show);
+    bool showVolumeButtons() const;
+    void setShowVolumeButtons(bool show);
+    bool alwaysRequestIdr() const;
+    void setAlwaysRequestIdr(bool enabled);
+    bool dx12Dither() const { return settings->GetDx12Dither(); }
+    void setDx12Dither(bool enabled) { settings->SetDx12Dither(enabled); }
+    bool dx12Deband() const { return settings->GetDx12Deband(); }
+    void setDx12Deband(bool enabled) { settings->SetDx12Deband(enabled); }
+    bool dx12HdrPassthrough() const { return settings->GetDx12HdrPassthrough(); }
+    void setDx12HdrPassthrough(bool enabled) { settings->SetDx12HdrPassthrough(enabled); }
+    int dx12HdrPaperWhite() const { return settings->GetDx12HdrPaperWhite(); }
+    void setDx12HdrPaperWhite(int nits) { settings->SetDx12HdrPaperWhite(nits); }
+    int dx12Contrast() const { return settings->GetDx12Contrast(); }
+    void setDx12Contrast(int pct) { settings->SetDx12Contrast(pct); }
+    int dx12Saturation() const { return settings->GetDx12Saturation(); }
+    void setDx12Saturation(int pct) { settings->SetDx12Saturation(pct); }
+    int dx12Gamma() const { return settings->GetDx12Gamma(); }
+    void setDx12Gamma(int pct) { settings->SetDx12Gamma(pct); }
+    QRect streamGeometry() const { return settings->GetStreamGeometry(); }
+    void setStreamGeometry(const QRect &rect) { settings->SetStreamGeometry(rect); }
+    Q_INVOKABLE void applyPxPlayKeyboardPreset();
+    Q_INVOKABLE void resetVideoSettings();
+    Q_INVOKABLE void resetStreamSettings();
+    Q_INVOKABLE void openDataFolder();
+    Q_INVOKABLE void openLogsFolder();
+    Q_INVOKABLE void openControllersFolder();
+    Q_INVOKABLE void openShadersFolder();
+#endif
     void setShowStreamStats(bool enabled);
 
     bool streamerMode() const;
@@ -641,6 +746,30 @@ signals:
     void hapticOverrideChanged();
     void audioVideoDisabledChanged();
     void showStreamStatsChanged();
+#ifdef PS5LINK_BUILD
+    void dx12EnabledChanged();
+    void dx12FrameGenerationChanged();
+    void dx12AmbientStyleChanged();
+    void dx12ErrorConcealmentChanged();
+    void dx12WindowModeChanged();
+    void dx12TouchpadWidthChanged();
+    void wifiStreamingModeChanged();
+    void preventDisplaySleepChanged();
+    void performanceModeChanged();
+    void controllerPollingMsChanged();
+    void gamepadQuitHotkeyChanged();
+    void enableRumbleChanged();
+    void enableAdaptiveTriggersChanged();
+    void enableGyroResetChanged();
+    void lightbarModeChanged();
+    void themeModeChanged();
+    void volumeControlsSystemChanged();
+    void hideOnScreenControlsChanged();
+    void showMicButtonChanged();
+    void showAspectButtonChanged();
+    void showVolumeButtonsChanged();
+    void alwaysRequestIdrChanged();
+#endif
     void streamerModeChanged();
     void fpsLocalPS4Changed();
     void fpsRemotePS4Changed();

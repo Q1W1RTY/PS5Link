@@ -43,8 +43,10 @@
 #define TAKION_INBOUND_STREAMS 0x64
 
 #define TAKION_REORDER_QUEUE_SIZE_EXP 4 // => 16 entries
-#define TAKION_AV_VIDEO_REORDER_QUEUE_SIZE_EXP 6 // => 64 entries
+#define TAKION_AV_VIDEO_REORDER_QUEUE_SIZE_EXP 8 // => 256 entries (handles large 50-100 Mbps IDR bursts)
 #define TAKION_AV_REORDER_TIMEOUT_US 16000 // ~1 frame at 60fps
+#define TAKION_SOCKET_RCVBUF_TARGET (4 * 1024 * 1024)
+#define TAKION_SOCKET_SNDBUF_TARGET (512 * 1024)
 
 #define TAKION_POSTPONE_PACKETS_SIZE 32
 
@@ -189,6 +191,33 @@ static ChiakiErrorCode takion_recv_message_cookie_ack(ChiakiTakion *takion);
 static void takion_handle_packet_av(ChiakiTakion *takion, uint8_t base_type, uint8_t *buf, size_t buf_size);
 static ChiakiErrorCode takion_read_extra_sock_messages(ChiakiTakion *takion);
 
+static ChiakiErrorCode takion_configure_socket_buffers(ChiakiTakion *takion)
+{
+	const int candidates[] = { TAKION_SOCKET_RCVBUF_TARGET, 1024 * 1024, (int)takion->a_rwnd };
+	int r = -1;
+	int applied = 0;
+	for(size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++)
+	{
+		const int rcvbuf_val = candidates[i];
+		r = setsockopt(takion->sock, SOL_SOCKET, SO_RCVBUF, (const CHIAKI_SOCKET_BUF_TYPE)&rcvbuf_val, sizeof(rcvbuf_val));
+		if(r == 0)
+		{
+			applied = rcvbuf_val;
+			break;
+		}
+	}
+	if(r < 0)
+	{
+		CHIAKI_LOGE(takion->log, "Takion failed to setsockopt SO_RCVBUF: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
+		return CHIAKI_ERR_NETWORK;
+	}
+	CHIAKI_LOGI(takion->log, "Takion socket SO_RCVBUF set to %d bytes", applied);
+
+	const int sndbuf_val = TAKION_SOCKET_SNDBUF_TARGET;
+	(void)setsockopt(takion->sock, SOL_SOCKET, SO_SNDBUF, (const CHIAKI_SOCKET_BUF_TYPE)&sndbuf_val, sizeof(sndbuf_val));
+	return CHIAKI_ERR_SUCCESS;
+}
+
 CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, ChiakiTakionConnectInfo *info, chiaki_socket_t *sock)
 {
 	ChiakiErrorCode ret = CHIAKI_ERR_SUCCESS;
@@ -241,6 +270,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 	takion->postponed_packets_size = 0;
 	takion->postponed_packets_count = 0;
 	takion->enable_dualsense = info->enable_dualsense;
+	takion->bypass_video_reorder_queue = info->bypass_video_reorder_queue;
 
 	CHIAKI_LOGI(takion->log, "Takion connecting (version %u)", (unsigned int)info->protocol_version);
 	bool mac_dontfrag = true;
@@ -261,14 +291,10 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 			CHIAKI_LOGE(takion->log, "Takion had problem reading extra messages from socket using PSN Connection with error: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
 			goto error_sock;
 		}
-		const int rcvbuf_val = takion->a_rwnd;
-		int r = setsockopt(takion->sock, SOL_SOCKET, SO_RCVBUF, (const CHIAKI_SOCKET_BUF_TYPE)&rcvbuf_val, sizeof(rcvbuf_val));
-		if(r < 0)
-		{
-			CHIAKI_LOGE(takion->log, "Takion failed to setsockopt SO_RCVBUF: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
-			ret = CHIAKI_ERR_NETWORK;
+		int r = 0;
+		ret = takion_configure_socket_buffers(takion);
+		if(ret != CHIAKI_ERR_SUCCESS)
 			goto error_sock;
-		}
 
 #if defined(__APPLE__) && TARGET_OS_OSX
 		SInt32 majorVersion;
@@ -349,14 +375,11 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 			ret = CHIAKI_ERR_NETWORK;
 			goto error_pipe;
 		}
-		const int rcvbuf_val = takion->a_rwnd;
-		int r = setsockopt(takion->sock, SOL_SOCKET, SO_RCVBUF, (const CHIAKI_SOCKET_BUF_TYPE)&rcvbuf_val, sizeof(rcvbuf_val));
-		if(r < 0)
-		{
-			CHIAKI_LOGE(takion->log, "Takion failed to setsockopt SO_RCVBUF: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
-			ret = CHIAKI_ERR_NETWORK;
+		chiaki_socket_bypass_tun(takion->sock, info->sa->sa_family, takion->log);
+		int r = 0;
+		ret = takion_configure_socket_buffers(takion);
+		if(ret != CHIAKI_ERR_SUCCESS)
 			goto error_sock;
-		}
 		if(info->ip_dontfrag)
 		{
 #if defined(__APPLE__) && TARGET_OS_OSX
@@ -441,6 +464,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 		}
 	}
 
+	chiaki_socket_apply_qos(takion->sock, takion->log);
 	err = chiaki_thread_create(&takion->thread, takion_thread_func, takion);
 
 	chiaki_thread_set_name(&takion->thread, "Chiaki Takion");
@@ -1098,6 +1122,9 @@ static void *takion_thread_func(void *user)
 {
 	ChiakiTakion *takion = user;
 	chiaki_thread_set_affinity(CHIAKI_THREAD_NAME_TAKION);
+#ifdef _WIN32
+	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+#endif
 
 	takion->video_queue_initialized = false;
 	takion->video_queue_head_wait_start_us = 0;
@@ -1192,13 +1219,7 @@ static void *takion_thread_func(void *user)
 			}
 			break;
 		}
-		uint8_t *resized_buf = realloc(buf, received_size);
-		if(!resized_buf)
-		{
-			free(buf);
-			continue;
-		}
-		takion_handle_packet(takion, resized_buf, received_size);
+		takion_handle_packet(takion, buf, received_size);
 	}
 
 	// Other threads (e.g. the heartbeat or an IDR request) may still send data, so stop them from using the send buffer first
@@ -1697,7 +1718,7 @@ static void takion_handle_packet_av(ChiakiTakion *takion, uint8_t base_type, uin
 	}
 
 	bool is_video = (base_type == TAKION_PACKET_TYPE_VIDEO);
-	if(!is_video)
+	if(!is_video || takion->bypass_video_reorder_queue)
 	{
 		if(takion->cb)
 		{

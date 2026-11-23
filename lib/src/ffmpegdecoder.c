@@ -246,6 +246,7 @@ CHIAKI_EXPORT ChiakiFfmpegFrame chiaki_ffmpeg_decoder_pull_frame(ChiakiFfmpegDec
 	// always try to pull as much as possible and return only the very last frame
 	AVFrame *frame_last = NULL;
 	AVFrame *frame = NULL;
+	unsigned decoded_count = 0;
 	while(true)
 	{
 		AVFrame *next_frame;
@@ -271,6 +272,7 @@ CHIAKI_EXPORT ChiakiFfmpegFrame chiaki_ffmpeg_decoder_pull_frame(ChiakiFfmpegDec
 			frame = frame_last;
 			break;
 		}
+		decoded_count++;
 	}
 	*frames_lost = decoder->frames_lost;
 	bool recovered = false;
@@ -289,6 +291,7 @@ CHIAKI_EXPORT ChiakiFfmpegFrame chiaki_ffmpeg_decoder_pull_frame(ChiakiFfmpegDec
 	ChiakiFfmpegFrame frame_plus_stats = {};
 	frame_plus_stats.frame = frame;
 	frame_plus_stats.recovered = recovered;
+	frame_plus_stats.decoded_count = decoded_count;
 	if(frame)
 	{
 		chiaki_ffmpeg_frame_get_timing(

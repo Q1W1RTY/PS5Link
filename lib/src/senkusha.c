@@ -131,7 +131,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_senkusha_run(ChiakiSenkusha *senkusha, uint
 		QUIT(quit);
 	}
 
-	ChiakiTakionConnectInfo takion_info;
+	ChiakiTakionConnectInfo takion_info = { 0 };
 	takion_info.log = senkusha->log;
 	if(!socket)
 	{

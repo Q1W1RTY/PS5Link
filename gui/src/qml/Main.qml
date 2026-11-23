@@ -9,10 +9,13 @@ Item {
     id: root
     property list<Item> restoreFocusItems
     property bool initialAsk: false
+    property bool quickLaunch: false
     readonly property bool preferSeparateStreamSettingsWindows: Chiaki.window.runtimeRendererBackend === 1 && Chiaki.session
     property bool useSeparateStreamSettingsWindows: false
-    Material.theme: Material.Dark
-    Material.accent: "#00a7ff"
+    Material.theme: Chiaki.settings.themeMode === 1 ? Material.Light : Chiaki.settings.themeMode === 2 ? Material.System : Material.Dark
+    Material.accent: "#0A84FF"
+    Material.background: Chiaki.settings.themeMode === 1 ? "#F5F6FA" : "#18181B"
+    Material.foreground: Chiaki.settings.themeMode === 1 ? "#262830" : "#F0F1F3"
 
     function controllerButton(name) {
         let type = "deck";
@@ -186,8 +189,14 @@ Item {
         stack.push(registDialogComponent, {host: host, ps5: ps5});
     }
 
-    function showSettingsDialog() {
-        stack.push(settingsDialogComponent);
+    function showSettingsDialog(fromStream) {
+        stack.push(settingsDialogComponent, { fromStream: fromStream === true });
+    }
+    function showAdvancedSettings() {
+        stack.push(settingsDialogComponent, { generalAdvanced: true });
+    }
+    function showFullStreamSettings() {
+        showSettingsDialog(true);
     }
 
     function showDisplaySettingsDialog() {
@@ -245,6 +254,8 @@ Item {
     Component.onCompleted: {
         if (Chiaki.session)
             stack.replace(stack.get(0), streamViewComponent, {}, StackView.Immediate);
+        else if (quickLaunch)
+            stack.replace(stack.get(0), autoConnectViewComponent, { quickLaunch: true }, StackView.Immediate);
         else if (Chiaki.autoConnect)
             stack.replace(stack.get(0), autoConnectViewComponent, {}, StackView.Immediate);
     }

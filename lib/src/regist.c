@@ -814,9 +814,6 @@ static ChiakiErrorCode regist_recv_response(ChiakiRegist *regist, ChiakiRegister
 	size_t payload_size = buf_filled_size - header_size;
 	chiaki_rpcrypt_decrypt(rpcrypt, 0, payload, payload, payload_size);
 
-	CHIAKI_LOGI(regist->log, "Regist response payload (decrypted):");
-	chiaki_log_hexdump(regist->log, CHIAKI_LOG_VERBOSE, payload, payload_size);
-
 	err = regist_parse_response_payload(regist, host, (char *)payload, payload_size);
 	if(err != CHIAKI_ERR_SUCCESS)
 	{

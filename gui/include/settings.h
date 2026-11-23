@@ -270,6 +270,100 @@ class Settings : public QObject
 		RumbleHapticsIntensity GetRumbleHapticsIntensity() const;
 		void SetRumbleHapticsIntensity(RumbleHapticsIntensity intensity);
 
+#ifdef PS5LINK_BUILD
+        int GetRtxVsrQuality() const { return settings.value("settings/rtx_vsr_quality", 0).toInt(); }
+        bool GetDx12Enabled() const { return settings.value("settings/dx12_enabled", false).toBool(); }
+        void SetDx12Enabled(bool enabled) { settings.setValue("settings/dx12_enabled", enabled); }
+        int GetDx12FrameGeneration() const
+        {
+            return qBound(0, settings.value("settings/dx12_frame_generation",
+                settings.value("settings/dx12_interpolation", false).toBool() ? 1 : 0).toInt(), 3);
+        }
+        void SetDx12FrameGeneration(int mode) { settings.setValue("settings/dx12_frame_generation", qBound(0, mode, 3)); }
+        int GetDx12DlssSr() const { return qBound(0, settings.value("settings/dx12_dlss_sr", 0).toInt(), 2); }
+        void SetDx12DlssSr(int model) { settings.setValue("settings/dx12_dlss_sr", qBound(0, model, 2)); }
+        int GetDx12PresentMode() const { return qBound(0, settings.value("settings/dx12_present_mode", 1).toInt(), 2); }
+        void SetDx12PresentMode(int mode) { settings.setValue("settings/dx12_present_mode", qBound(0, mode, 2)); }
+        int GetDx12Aspect() const { return qBound(0, settings.value("settings/dx12_aspect", 0).toInt(), 3); }
+        void SetDx12Aspect(int aspect) { settings.setValue("settings/dx12_aspect", qBound(0, aspect, 3)); }
+        int GetDx12AmbientStyle() const { return qBound(0, settings.value("settings/dx12_ambient_style", 2).toInt(), 2); }
+        void SetDx12AmbientStyle(int style) { settings.setValue("settings/dx12_ambient_style", qBound(0, style, 2)); }
+        bool GetDx12Fsr() const { return settings.value("settings/dx12_fsr", false).toBool(); }
+        void SetDx12Fsr(bool enabled) { settings.setValue("settings/dx12_fsr", enabled); }
+        int GetDx12UpscaleHeight() const
+        {
+            const int h = settings.value("settings/dx12_upscale_height", 0).toInt();
+            return (h == 1 || h == 1800 || h == 2160) ? h : 0;
+        }
+        void SetDx12UpscaleHeight(int height) { settings.setValue("settings/dx12_upscale_height", (height == 1 || height == 1800 || height == 2160) ? height : 0); }
+        int GetDx12Sharpness() const { return qBound(-1, settings.value("settings/dx12_sharpness", -1).toInt(), 100); }
+        void SetDx12Sharpness(int sharpness) { settings.setValue("settings/dx12_sharpness", qBound(-1, sharpness, 100)); }
+        bool GetDx12ErrorConcealment() const { return settings.value("settings/dx12_error_concealment", false).toBool(); }
+        void SetDx12ErrorConcealment(bool enabled) { settings.setValue("settings/dx12_error_concealment", enabled); }
+        int GetDx12WindowMode() const { return qBound(0, settings.value("settings/dx12_window_mode", 0).toInt(), 2); }
+        void SetDx12WindowMode(int mode) { settings.setValue("settings/dx12_window_mode", qBound(0, mode, 2)); }
+        int GetDx12TouchpadWidth() const { return qBound(25, settings.value("settings/dx12_touchpad_width", 100).toInt(), 100); }
+        void SetDx12TouchpadWidth(int percent) { settings.setValue("settings/dx12_touchpad_width", qBound(25, percent, 100)); }
+        bool GetWifiStreamingMode() const { return settings.value("settings/wifi_streaming_mode", true).toBool(); }
+        void SetWifiStreamingMode(bool enabled) { settings.setValue("settings/wifi_streaming_mode", enabled); }
+        bool GetPreventDisplaySleep() const { return settings.value("settings/prevent_display_sleep", true).toBool(); }
+        void SetPreventDisplaySleep(bool enabled) { settings.setValue("settings/prevent_display_sleep", enabled); }
+        int GetPerformanceMode() const { return qBound(0, settings.value("settings/performance_mode", 1).toInt(), 1); }
+        void SetPerformanceMode(int mode) { settings.setValue("settings/performance_mode", qBound(0, mode, 1)); }
+        int GetControllerPollingMs() const
+        {
+            const int ms = settings.value("settings/controller_polling_ms", 4).toInt();
+            return (ms == 1 || ms == 2 || ms == 4 || ms == 8) ? ms : 4;
+        }
+        void SetControllerPollingMs(int ms) { settings.setValue("settings/controller_polling_ms", qBound(1, ms, 8)); }
+        bool GetGamepadQuitHotkey() const { return settings.value("settings/gamepad_quit_hotkey", false).toBool(); }
+        void SetGamepadQuitHotkey(bool enabled) { settings.setValue("settings/gamepad_quit_hotkey", enabled); }
+        bool GetEnableRumble() const { return settings.value("settings/enable_rumble", true).toBool(); }
+        void SetEnableRumble(bool enabled) { settings.setValue("settings/enable_rumble", enabled); }
+        bool GetEnableAdaptiveTriggers() const { return settings.value("settings/enable_adaptive_triggers", true).toBool(); }
+        void SetEnableAdaptiveTriggers(bool enabled) { settings.setValue("settings/enable_adaptive_triggers", enabled); }
+        bool GetBtSpeakerAudio() const { return settings.value("settings/bt_speaker_audio", false).toBool(); }
+        void SetBtSpeakerAudio(bool enabled) { settings.setValue("settings/bt_speaker_audio", enabled); }
+        bool GetEnableGyroReset() const { return settings.value("settings/enable_gyro_reset", true).toBool(); }
+        void SetEnableGyroReset(bool enabled) { settings.setValue("settings/enable_gyro_reset", enabled); }
+        int GetLightbarMode() const { return qBound(0, settings.value("settings/lightbar_mode", 1).toInt(), 3); }
+        void SetLightbarMode(int mode) { settings.setValue("settings/lightbar_mode", qBound(0, mode, 3)); }
+        int GetThemeMode() const { return qBound(0, settings.value("settings/theme_mode", 0).toInt(), 2); }
+        void SetThemeMode(int mode) { settings.setValue("settings/theme_mode", qBound(0, mode, 2)); }
+        bool GetVolumeControlsSystem() const { return settings.value("settings/volume_controls_system", false).toBool(); }
+        void SetVolumeControlsSystem(bool enabled) { settings.setValue("settings/volume_controls_system", enabled); }
+        bool GetHideOnScreenControls() const { return settings.value("settings/hide_on_screen_controls", false).toBool(); }
+        void SetHideOnScreenControls(bool hide) { settings.setValue("settings/hide_on_screen_controls", hide); }
+        bool GetShowMicButton() const { return settings.value("settings/show_mic_button", true).toBool(); }
+        void SetShowMicButton(bool show) { settings.setValue("settings/show_mic_button", show); }
+        bool GetShowAspectButton() const { return settings.value("settings/show_aspect_button", true).toBool(); }
+        void SetShowAspectButton(bool show) { settings.setValue("settings/show_aspect_button", show); }
+        bool GetShowVolumeButtons() const { return settings.value("settings/show_volume_buttons", true).toBool(); }
+        void SetShowVolumeButtons(bool show) { settings.setValue("settings/show_volume_buttons", show); }
+        bool GetAlwaysRequestIdr() const { return settings.value("settings/always_request_idr", false).toBool(); }
+        void SetAlwaysRequestIdr(bool enabled) { settings.setValue("settings/always_request_idr", enabled); }
+        bool GetDx12Dither() const { return settings.value("settings/dx12_dither", true).toBool(); }
+        void SetDx12Dither(bool enabled) { settings.setValue("settings/dx12_dither", enabled); }
+        bool GetDx12Deband() const { return settings.value("settings/dx12_deband", false).toBool(); }
+        void SetDx12Deband(bool enabled) { settings.setValue("settings/dx12_deband", enabled); }
+        bool GetDx12HdrPassthrough() const { return settings.value("settings/dx12_hdr_passthrough", true).toBool(); }
+        void SetDx12HdrPassthrough(bool enabled) { settings.setValue("settings/dx12_hdr_passthrough", enabled); }
+        int GetDx12HdrPaperWhite() const { return qBound(120, settings.value("settings/dx12_hdr_paper_white", 203).toInt(), 400); }
+        void SetDx12HdrPaperWhite(int nits) { settings.setValue("settings/dx12_hdr_paper_white", qBound(120, nits, 400)); }
+        int GetDx12Contrast() const { return qBound(80, settings.value("settings/dx12_contrast", 100).toInt(), 130); }
+        void SetDx12Contrast(int pct) { settings.setValue("settings/dx12_contrast", qBound(80, pct, 130)); }
+        int GetDx12Saturation() const { return qBound(50, settings.value("settings/dx12_saturation", 100).toInt(), 150); }
+        void SetDx12Saturation(int pct) { settings.setValue("settings/dx12_saturation", qBound(50, pct, 150)); }
+        int GetDx12Gamma() const { return qBound(80, settings.value("settings/dx12_gamma", 100).toInt(), 125); }
+        void SetDx12Gamma(int pct) { settings.setValue("settings/dx12_gamma", qBound(80, pct, 125)); }
+        void SetRtxVsrQuality(int quality) { settings.setValue("settings/rtx_vsr_quality", quality); }
+        void ApplyPxPlayKeyboardPreset();
+        void ResetVideoSettings();
+        void ResetStreamSettings();
+        QString GetDataDirectory() const;
+        QString GetControllersDirectory() const;
+        QString GetShadersDirectory() const;
+#endif
 		bool GetShowStreamStats() const            { return settings.value("settings/show_stream_stats", false).toBool(); }
 		void SetShowStreamStats(bool enabled)      { settings.setValue("settings/show_stream_stats", enabled); }
 

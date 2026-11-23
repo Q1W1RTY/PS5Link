@@ -11,7 +11,7 @@ Rectangle {
     property bool textVisible: true
     property bool registOnly: false
     property list<Item> restoreFocusItems
-    color: "black"
+    color: "#18181B"
 
     StackView.onActivated: infoLabel.visible = false
 

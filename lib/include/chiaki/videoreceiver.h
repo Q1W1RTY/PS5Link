@@ -17,6 +17,18 @@ extern "C" {
 
 #define CHIAKI_VIDEO_PROFILES_MAX 8
 
+typedef struct chiaki_video_recovery_stats_t
+{
+    uint64_t loss_started_ms;
+    uint64_t last_recovery_ms;
+    uint64_t fec_recovered_frames;
+    uint64_t reordered_frames;
+    uint64_t idr_requests;
+    uint64_t frames_held_for_keyframe;
+    uint64_t assembled_video_bytes;
+    bool has_recovered;
+} ChiakiVideoRecoveryStats;
+
 typedef struct chiaki_video_receiver_t
 {
 	struct chiaki_session_t *session;
@@ -27,8 +39,11 @@ typedef struct chiaki_video_receiver_t
 
 	int32_t frame_index_cur; // frame that is currently being filled
 	int32_t frame_index_prev; // last frame that has been at least partially decoded
-	int32_t frame_index_prev_complete; // last frame that has been completely decoded
 	ChiakiFrameProcessor frame_processor;
+	ChiakiFrameProcessor next_frame_processor; // 2nd assembly slot for cross-frame UDP reordering
+	int32_t next_frame_index; // -1 if empty, else (frame_index_cur + 1)
+	int next_frame_profile; // adaptive_stream_index for next_frame_index, or -1
+	bool next_frame_saw_last_unit;
 	ChiakiPacketStats *packet_stats;
 
 	int32_t frames_lost;
@@ -39,6 +54,9 @@ typedef struct chiaki_video_receiver_t
 	bool waiting_for_idr;
 	uint64_t idr_request_last_ms; // when the IDR being waited for was last requested
 	ChiakiMutex frames_lost_mutex;
+	ChiakiVideoRecoveryStats recovery_stats;
+	uint64_t reorder_deadline_ms;
+	bool frame_follows_gap;
 } ChiakiVideoReceiver;
 
 CHIAKI_EXPORT void chiaki_video_receiver_init(ChiakiVideoReceiver *video_receiver, struct chiaki_session_t *session, ChiakiPacketStats *packet_stats);
@@ -57,6 +75,8 @@ CHIAKI_EXPORT void chiaki_video_receiver_av_packet(ChiakiVideoReceiver *video_re
 CHIAKI_EXPORT void chiaki_video_receiver_set_waiting_for_idr(ChiakiVideoReceiver *video_receiver, bool waiting_for_idr);
 CHIAKI_EXPORT bool chiaki_video_receiver_get_waiting_for_idr(ChiakiVideoReceiver *video_receiver);
 CHIAKI_EXPORT int32_t chiaki_video_receiver_get_frames_lost_total(ChiakiVideoReceiver *video_receiver);
+
+CHIAKI_EXPORT ChiakiVideoRecoveryStats chiaki_video_receiver_get_recovery_stats(ChiakiVideoReceiver *video_receiver);
 
 static inline ChiakiVideoReceiver *chiaki_video_receiver_new(struct chiaki_session_t *session, ChiakiPacketStats *packet_stats)
 {

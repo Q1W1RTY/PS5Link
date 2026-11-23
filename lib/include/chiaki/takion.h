@@ -117,6 +117,7 @@ typedef struct chiaki_takion_connect_info_t
 	bool enable_dualsense;
 	uint8_t protocol_version;
 	bool close_socket; // close socket when finishing takion
+	bool bypass_video_reorder_queue; // deliver video packets directly to VideoReceiver (avoids double reorder & 16ms FEC stall)
 } ChiakiTakionConnectInfo;
 
 
@@ -155,6 +156,7 @@ typedef struct chiaki_takion_t
 	ChiakiReorderQueue data_queue;
 	ChiakiReorderQueue video_queue;
 	bool video_queue_initialized;
+	bool bypass_video_reorder_queue;
 	int64_t video_queue_head_wait_start_us;
 	uint64_t video_queue_head_wait_seq_num;
 	ChiakiTakionSendBuffer send_buffer;

@@ -11,12 +11,14 @@ foreach(_input include/curl/curl.h lib/vtls/schannel_verify.c)
 endforeach()
 execute_process(COMMAND "${GIT_EXECUTABLE}" apply --unsafe-paths
     "--directory=${CHIAKI_CURL_SOURCE_DIR}" --check "${_aia_patch}"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     RESULT_VARIABLE _can_apply)
 if(NOT _can_apply EQUAL 0)
     message(FATAL_ERROR "Bundled curl does not match the Schannel AIA patch")
 endif()
 execute_process(COMMAND "${GIT_EXECUTABLE}" apply --unsafe-paths
     "--directory=${CHIAKI_CURL_SOURCE_DIR}" "${_aia_patch}"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     RESULT_VARIABLE _apply_result)
 if(NOT _apply_result EQUAL 0)
     message(FATAL_ERROR "Failed to apply the Schannel AIA patch")

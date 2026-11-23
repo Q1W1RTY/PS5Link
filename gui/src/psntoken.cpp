@@ -46,7 +46,13 @@ void PSNToken::handleAccessTokenResponse(const QString& url, const QJsonDocument
 }
 
 void PSNToken::handleErrorResponse(const QString& url, const QString& error, const QNetworkReply::NetworkError& err) {
+#ifdef PS5LINK_BUILD
+    Q_UNUSED(url)
+    Q_UNUSED(error)
+    emit PSNTokenError(tr("PSN token request failed (network error %1).").arg(err));
+#else
     emit PSNTokenError(QString("[E] : Url (%1) returned error (%2) with error code (%3)").arg(url).arg(error).arg(err));
+#endif
     if(err == QNetworkReply::ProtocolInvalidOperationError)
         emit UnauthorizedError();
     emit Finished();

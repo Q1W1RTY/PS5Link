@@ -568,10 +568,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_holepunch_list_devices(
         err = CHIAKI_ERR_UNKNOWN;
         goto cleanup_json;
     }
-    CHIAKI_LOGV(log, console_type == CHIAKI_HOLEPUNCH_CONSOLE_TYPE_PS5 ? "PS5 devices: ": "PS4 devices: ");
-    const char *json_str = json_object_to_json_string_ext(clients, JSON_C_TO_STRING_PRETTY);
-    CHIAKI_LOGV(log, "chiaki_holepunch_list_devices: retrieved devices \n%s", json_str);
     size_t num_clients = json_object_array_length(clients);
+    CHIAKI_LOGV(log, "chiaki_holepunch_list_devices: retrieved %zu %s device(s)",
+        num_clients, console_type == CHIAKI_HOLEPUNCH_CONSOLE_TYPE_PS5 ? "PS5" : "PS4");
     *devices = malloc(sizeof(ChiakiHolepunchDeviceInfo) * num_clients);
     if(!(*devices))
     {
@@ -832,7 +831,7 @@ CHIAKI_EXPORT Session* chiaki_holepunch_session_init(
     return session;
 }
 
-#define UPNP_DISCOVER_TIMEOUT_MS 7000
+#define UPNP_DISCOVER_TIMEOUT_MS 2000
 
 static void *upnp_discover_thread_func(void *arg)
 {
@@ -1045,8 +1044,6 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_holepunch_session_create(Session* session)
             if (!online_id_json || !json_object_is_type(online_id_json, json_type_string))
             {
                 CHIAKI_LOGE(session->log, "chiaki_holepunch_session_create: JSON does not contain member with online Id of user");
-                const char *json_str = json_object_to_json_string_ext(notif->json, JSON_C_TO_STRING_PRETTY);
-                CHIAKI_LOGV(session->log, "chiaki_holepunch_session_create: JSON was:\n%s", json_str);
                 err = CHIAKI_ERR_UNKNOWN;
                 break;
             }
@@ -1188,8 +1185,6 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_holepunch_session_start(
             if (!member_duid_json || !json_object_is_type(member_duid_json, json_type_string))
             {
                 CHIAKI_LOGE(session->log, "chiaki_holepunch_session_start: JSON does not contain member with a deviceUniqueId string field!");
-                const char *json_str = json_object_to_json_string_ext(notif->json, JSON_C_TO_STRING_PRETTY);
-                CHIAKI_LOGV(session->log, "chiaki_holepunch_session_start: JSON was:\n%s", json_str);
                 err = CHIAKI_ERR_UNKNOWN;
                 break;
             }
@@ -1227,8 +1222,6 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_holepunch_session_start(
             if (!custom_data1_json || !json_object_is_type(custom_data1_json, json_type_string))
             {
                 CHIAKI_LOGE(session->log, "chiaki_holepunch_session_start: JSON does not contain \"customData1\" string field");
-                const char *json_str = json_object_to_json_string_ext(notif->json, JSON_C_TO_STRING_PRETTY);
-                CHIAKI_LOGV(session->log, "chiaki_holepunch_session_start: JSON was:\n%s", json_str);
                 err = CHIAKI_ERR_UNKNOWN;
                 break;
             }
@@ -1370,7 +1363,6 @@ static ChiakiErrorCode http_ps4_session_wakeup(Session *session)
     if (schema_bad)
     {
         CHIAKI_LOGE(session->log, "http_ps4_session_wakeup: Unexpected JSON schema, could not parse user profile url");
-        CHIAKI_LOGV(session->log, json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
         err = CHIAKI_ERR_UNKNOWN;
         goto cleanup_json;
     }
@@ -2486,10 +2478,8 @@ ws_after_recovery:
             if (json == NULL)
             {
                 CHIAKI_LOGE(session->log, "websocket_thread_func: Parsing JSON from payload failed");
-                CHIAKI_LOGV(session->log, "websocket_thread_func: Payload was:\n%s", buf);
                 continue;
             }
-            CHIAKI_LOGV(session->log, json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
 
             NotificationType type = parse_notification_type(session->log, json);
             char *json_buf = malloc(rlen);
@@ -2627,7 +2617,6 @@ static NotificationType parse_notification_type(
     }else
     {
         CHIAKI_LOGW(log, "parse_notification_type: Unknown notification type \"%s\"", datatype_str);
-        CHIAKI_LOGV(log, "parse_notification_type: JSON was:\n%s", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
         return NOTIFICATION_TYPE_UNKNOWN;
     }
 }
@@ -3269,15 +3258,13 @@ static ChiakiErrorCode http_create_session(Session *session)
     if (schema_bad)
     {
         CHIAKI_LOGE(session->log, "http_create_session: Unexpected JSON schema, could not parse sessionId and accountId.");
-        CHIAKI_LOGV(session->log, json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
         err = CHIAKI_ERR_UNKNOWN;
         goto cleanup_json;
     }
     const char* session_id = json_object_get_string(session_id_json);
     if (strlen(session_id) != 36)
     {
-        CHIAKI_LOGE(session->log, "http_create_session: Unexpected JSON schema, sessionId is not a UUIDv4, was '%s'.", session_id);
-        CHIAKI_LOGV(session->log, json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
+        CHIAKI_LOGE(session->log, "http_create_session: Unexpected JSON schema, sessionId is not a UUIDv4.");
         err = CHIAKI_ERR_UNKNOWN;
         goto cleanup_json;
     }
@@ -3374,8 +3361,7 @@ static ChiakiErrorCode http_check_session(Session *session, bool viewurl)
         err = CHIAKI_ERR_UNKNOWN;
         goto cleanup_json_tokener;
     }
-    const char *json_str = json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY);
-    CHIAKI_LOGV(session->log, "http_check_session: retrieved session data \n%s", json_str);
+    CHIAKI_LOGV(session->log, "http_check_session: retrieved session data");
 
     json_object_put(json);
     cleanup_json_tokener:
@@ -3550,7 +3536,6 @@ static ChiakiErrorCode http_send_session_message(Session *session, SessionMessag
         payload_str, session->account_id, console_uid_str,
         session->console_type == CHIAKI_HOLEPUNCH_CONSOLE_TYPE_PS4 ? "PS4" : "PS5"
     );
-    CHIAKI_LOGV(session->log, "Message to send: %s", msg_buf);
     CURL *curl = curl_easy_init();
     if(!curl)
     {
@@ -5190,14 +5175,12 @@ static json_object* session_message_get_payload(ChiakiLog *log, json_object *ses
     if (json_pointer_get(session_message, "/body/data/sessionMessage/payload", &payload_json) < 0)
     {
         CHIAKI_LOGE(log, "session_message_get_payload: Failed to get payload");
-        CHIAKI_LOGV(log, json_object_to_json_string_ext(session_message, JSON_C_TO_STRING_PRETTY));
         return NULL;
     }
 
     if (!json_object_is_type(payload_json, json_type_string))
     {
         CHIAKI_LOGE(log, "session_message_get_payload: Payload is not a string");
-        CHIAKI_LOGV(log, json_object_to_json_string_ext(session_message, JSON_C_TO_STRING_PRETTY));
         return NULL;
     }
 
@@ -5206,7 +5189,6 @@ static json_object* session_message_get_payload(ChiakiLog *log, json_object *ses
     char* body = strstr(payload_str, "body=");
     if (body == NULL) {
         CHIAKI_LOGE(log, "session_message_get_payload: Failed to find body of payload");
-        CHIAKI_LOGV(log, payload_str);
         return NULL;
     }
 
@@ -5223,7 +5205,12 @@ static json_object* session_message_get_payload(ChiakiLog *log, json_object *ses
 
     // No localPeerAddr, nothing to fix
     if (peeraddr_start == NULL)
-        return json_tokener_parse(json);
+    {
+        message_json = json_tokener_parse(json);
+        if (message_json == NULL)
+            CHIAKI_LOGE(log, "session_message_get_payload: Couldn't parse session message JSON");
+        return message_json;
+    }
 
     char *peeraddr_end = peeraddr_start + strlen(peeraddr_key);
     if (*peeraddr_end == '{')
@@ -5244,18 +5231,10 @@ static json_object* session_message_get_payload(ChiakiLog *log, json_object *ses
         strncpy(fixed_json + prefix_len + 2, peeraddr_end, suffix_len);
 
         message_json = json_tokener_parse(fixed_json);
-        if(message_json == NULL)
-        {
-            CHIAKI_LOGE(log, "Couldn't parse the following fixed json: %s", fixed_json);
-            CHIAKI_LOGE(log, json_object_to_json_string_ext(payload_json, JSON_C_TO_STRING_PRETTY));
-        }
     }
-        // check if parse fails
-        if(message_json == NULL)
-        {
-            CHIAKI_LOGE(log, "Couldn't parse the following json: %s", json);
-            CHIAKI_LOGE(log, json_object_to_json_string_ext(payload_json, JSON_C_TO_STRING_PRETTY));
-        }
+    // check if parse fails (do not dump raw payload JSON as it may contain session keys/tokens)
+    if(message_json == NULL)
+        CHIAKI_LOGE(log, "session_message_get_payload: Couldn't parse session message JSON");
 
     return message_json;
 }
@@ -5601,7 +5580,7 @@ static ChiakiErrorCode session_message_parse(
         err = chiaki_base64_decode(skey_str, strlen(skey_str), msg->conn_request->skey, &skey_len);
         if (err != CHIAKI_ERR_SUCCESS)
         {
-            CHIAKI_LOGE(log, "session_message_parse: Failed to decode skey: '%s'", skey_str);
+            CHIAKI_LOGE(log, "session_message_parse: Failed to decode the session key");
             goto cleanup;
         }
 
@@ -5729,7 +5708,6 @@ static ChiakiErrorCode session_message_parse(
 
 invalid_schema:
     CHIAKI_LOGE(log, "session_message_parse: Unexpected JSON schema for holepunch session message.");
-    CHIAKI_LOGV(log, json_object_to_json_string_ext(message_json, JSON_C_TO_STRING_PRETTY));
     err = CHIAKI_ERR_UNKNOWN;
 
 cleanup:
@@ -6184,15 +6162,6 @@ static void print_session_request(ChiakiLog *log, ConnectionRequest *req)
     CHIAKI_LOGV(log, "-----------------CONNECTION REQUEST---------------------");
     CHIAKI_LOGV(log, "sid: %"PRIu32, req->sid);
     CHIAKI_LOGV(log, "peer_sid: %"PRIu32, req->peer_sid);
-    char skey[25];
-    ChiakiErrorCode err = chiaki_base64_encode(req->skey, sizeof(req->skey), skey, sizeof(skey));
-    if(err != CHIAKI_ERR_SUCCESS)
-    {
-        char hex[33];
-        bytes_to_hex(req->skey, sizeof(req->skey), hex, sizeof(hex));
-        CHIAKI_LOGE(log, "Error with base64 encoding of skey: %s", hex);
-    }
-    CHIAKI_LOGV(log, "skey: %s", skey);
     CHIAKI_LOGV(log, "nat type %u", req->nat_type);
     uint8_t zero_bytes0[sizeof(req->default_route_mac_addr)] = {0};
     if(memcmp(zero_bytes0, req->default_route_mac_addr, sizeof(req->default_route_mac_addr)) != 0)
@@ -6207,7 +6176,7 @@ static void print_session_request(ChiakiLog *log, ConnectionRequest *req)
     if(memcmp(req->local_hashed_id, zero_bytes, sizeof(req->local_hashed_id)) != 0)
     {
         char local_hashed_id[29];
-        err = chiaki_base64_encode(req->local_hashed_id, sizeof(req->local_hashed_id), local_hashed_id, sizeof(local_hashed_id));
+        ChiakiErrorCode err = chiaki_base64_encode(req->local_hashed_id, sizeof(req->local_hashed_id), local_hashed_id, sizeof(local_hashed_id));
         if(err != CHIAKI_ERR_SUCCESS)
         {
             char hex[41];

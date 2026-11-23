@@ -39,3 +39,5 @@ chiaki.conf
 .cache/
 *.vscode
 site/
+/gui/launcher/bin/
+/gui/launcher/obj/

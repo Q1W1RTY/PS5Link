@@ -1,4 +1,7 @@
 #include "qmlmainwindow.h"
+#ifdef PS5LINK_BUILD
+#include <rtxvsr.h>
+#endif
 #include "qmlbackend.h"
 #include "qmlsvgprovider.h"
 #include "chiaki/log.h"
@@ -111,6 +114,7 @@ public:
     StatsOverlayWidget(QmlMainWindow *owner, QmlBackend *backend)
         : QWidget(nullptr)
         , owner(owner)
+        , target(owner)
         , backend(backend)
     {
         setObjectName(QStringLiteral("statsOverlayWidget"));
@@ -122,7 +126,7 @@ public:
         setAutoFillBackground(false);
 
         auto *outer = new QHBoxLayout(this);
-        outer->setContentsMargins(0, 0, 6, 0);
+        outer->setContentsMargins(16, 16, 16, 16);
         outer->setSpacing(0);
         outer->addStretch(1);
 
@@ -130,15 +134,19 @@ public:
         panel->setObjectName(QStringLiteral("statsPanel"));
         panel->setStyleSheet(QStringLiteral(
             "#statsPanel {"
-            "  background: rgba(0, 0, 0, 140);"
-            "  border-radius: 10px;"
+            "  background: rgba(24, 24, 27, 242);"
+            "  border: 1px solid #3C3C46;"
+            "  border-radius: 18px;"
             "}"
-            "QLabel { color: white; }"));
+            "QLabel { color: #F0F1F3; }"));
         panel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Minimum);
 
         auto *panelLayout = new QVBoxLayout(panel);
-        panelLayout->setContentsMargins(14, 12, 14, 12);
-        panelLayout->setSpacing(8);
+        panelLayout->setContentsMargins(15, 13, 15, 13);
+        panelLayout->setSpacing(5);
+        auto *heading = new QLabel(QStringLiteral("●  ") + tr("PS5Link HUD"), panel);
+        heading->setStyleSheet(QStringLiteral("color: #30D158; font-size: 13px; font-weight: 600; border: none;"));
+        panelLayout->addWidget(heading);
 
         auto makeRow = [panelLayout](const QString &title, const QColor &valueColor, QFont titleFont, QFont valueFont, QLabel *&valueLabel) {
             auto *row = new QWidget(panelLayout->parentWidget());
@@ -147,12 +155,13 @@ public:
             rowLayout->setSpacing(8);
             auto *titleLabel = new QLabel(title, row);
             titleLabel->setFont(titleFont);
-            titleLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            titleLabel->setStyleSheet(QStringLiteral("color: #A5A5A5; border: none;"));
+            titleLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
             titleLabel->setMinimumWidth(110);
             auto *value = new QLabel(row);
             value->setFont(valueFont);
             value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-            value->setStyleSheet(QStringLiteral("color: %1;").arg(valueColor.name()));
+            value->setStyleSheet(QStringLiteral("color: %1; border: none;").arg(valueColor.name()));
             value->setTextInteractionFlags(Qt::NoTextInteraction);
             valueLabel = value;
             rowLayout->addWidget(titleLabel);
@@ -162,19 +171,38 @@ public:
         };
 
         QFont titleFont;
-        titleFont.setPixelSize(15);
+        titleFont.setPixelSize(13);
         QFont valueFont;
-        valueFont.setPixelSize(18);
+        valueFont.setPixelSize(14);
         valueFont.setBold(true);
 
-        bitrateRow = makeRow(tr("Mbps"), QColor(QStringLiteral("#00a7ff")), titleFont, valueFont, bitrateValue);
-        queueRow = makeRow(tr("queue depth avg"), QColor(QStringLiteral("#90caf9")), titleFont, valueFont, queueDepthValue);
-        pendingRow = makeRow(tr("pending frame age"), QColor(QStringLiteral("#90caf9")), titleFont, valueFont, pendingAgeValue);
-        packetLossRow = makeRow(tr("packet loss"), QColor(QStringLiteral("#ef9a9a")), titleFont, valueFont, packetLossValue);
-        droppedFramesRow = makeRow(tr("dropped frames"), QColor(QStringLiteral("#ef9a9a")), titleFont, valueFont, droppedFramesValue);
-        lostFramesRow = makeRow(tr("lost frames"), QColor(QStringLiteral("#ef9a9a")), titleFont, valueFont, lostFramesValue);
+        bitrateRow = makeRow(tr("Bitrate"), QColor(QStringLiteral("#30D158")), titleFont, valueFont, bitrateValue);
+#ifdef PS5LINK_BUILD
+        decodedFpsRow = makeRow(tr("Decoded FPS"), QColor(QStringLiteral("#30D158")), titleFont, valueFont, decodedFpsValue);
+        submittedFpsRow = makeRow(tr("Output FPS"), QColor(QStringLiteral("#30D158")), titleFont, valueFont, submittedFpsValue);
+        generatedFpsRow = makeRow(tr("Generated FPS"), QColor(QStringLiteral("#72B4FF")), titleFont, valueFont, generatedFpsValue);
+        fpsTimer.setInterval(1000);
+        connect(&fpsTimer, &QTimer::timeout, this, &StatsOverlayWidget::sampleFps);
+#endif
+        queueRow = makeRow(tr("queue depth avg"), QColor(QStringLiteral("#72B4FF")), titleFont, valueFont, queueDepthValue);
+        pendingRow = makeRow(tr("pending frame age"), QColor(QStringLiteral("#72B4FF")), titleFont, valueFont, pendingAgeValue);
+        packetLossRow = makeRow(tr("packet loss"), QColor(QStringLiteral("#FF6961")), titleFont, valueFont, packetLossValue);
+        droppedFramesRow = makeRow(tr("dropped frames"), QColor(QStringLiteral("#FF6961")), titleFont, valueFont, droppedFramesValue);
+        lostFramesRow = makeRow(tr("lost frames"), QColor(QStringLiteral("#FF6961")), titleFont, valueFont, lostFramesValue);
 
-        outer->addWidget(panel, 0, Qt::AlignRight | Qt::AlignVCenter);
+#ifdef PS5LINK_BUILD
+        recoveryValue = new QLabel(panel);
+        recoveryValue->setTextFormat(Qt::PlainText);
+        recoveryValue->setWordWrap(true);
+        recoveryValue->setMaximumWidth(250);
+        recoveryValue->setStyleSheet(QStringLiteral("color: #A5A5A5; font-size: 12px; border: none;"));
+        panelLayout->addWidget(recoveryValue);
+        vsrValue = new QLabel(panel);
+        vsrValue->setStyleSheet(QStringLiteral("color: #30D158; font-size: 12px; border: none;"));
+        panelLayout->addWidget(vsrValue);
+        connect(owner, &QmlMainWindow::rtxVsrActiveChanged, this, &StatsOverlayWidget::refresh);
+#endif
+        outer->addWidget(panel, 0, Qt::AlignRight | Qt::AlignTop);
 
         connect(owner, &QmlMainWindow::queueDepthAverageChanged, this, &StatsOverlayWidget::refresh);
         connect(owner, &QmlMainWindow::pendingFrameAgeChanged, this, &StatsOverlayWidget::refresh);
@@ -196,32 +224,56 @@ public:
             syncGeometry();
             refresh();
             if (!isVisible())
+            {
+#ifdef PS5LINK_BUILD
+                resetFpsSample();
+                fpsTimer.start();
+#endif
                 show();
+            }
             updateTransientParent();
-            if (owner)
+            if (owner && target == owner)
                 owner->requestActivate();
         } else {
+#ifdef PS5LINK_BUILD
+            fpsTimer.stop();
+#endif
             if (QWindow *overlay_window = windowHandle())
                 overlay_window->setTransientParent(nullptr);
             hide();
         }
     }
 
+    void setTarget(QWindow *window)
+    {
+        if(target && target != owner)
+            disconnect(target, nullptr, this, nullptr);
+        target = window ? window : owner.data();
+#ifdef PS5LINK_BUILD
+        resetFpsSample();
+#endif
+        if(target && target != owner)
+        {
+            connect(target, &QWindow::xChanged, this, &StatsOverlayWidget::syncGeometry);
+            connect(target, &QWindow::yChanged, this, &StatsOverlayWidget::syncGeometry);
+            connect(target, &QWindow::widthChanged, this, &StatsOverlayWidget::syncGeometry);
+            connect(target, &QWindow::heightChanged, this, &StatsOverlayWidget::syncGeometry);
+        }
+    }
+
     void syncGeometry()
     {
-        if (!owner)
+        if (!target)
             return;
-        const QRect g = owner->geometry();
+        const QRect g = target->geometry();
         if (geometry() != g)
             setGeometry(g);
     }
 
     void updateTransientParent()
     {
-        if (!owner)
-            return;
         if (QWindow *overlay_window = windowHandle())
-            overlay_window->setTransientParent(owner);
+            overlay_window->setTransientParent(target);
     }
 
     void setSession(StreamSession *session)
@@ -231,11 +283,17 @@ public:
         if (current_session)
             QObject::disconnect(current_session, nullptr, this, nullptr);
         current_session = session;
+#ifdef PS5LINK_BUILD
+        resetFpsSample();
+#endif
         if (current_session) {
             connect(current_session, &StreamSession::MeasuredBitrateChanged, this, &StatsOverlayWidget::refresh);
             connect(current_session, &StreamSession::AveragePacketLossChanged, this, &StatsOverlayWidget::refresh);
             connect(current_session, &StreamSession::FramesLostChanged, this, &StatsOverlayWidget::refresh);
             connect(current_session, &StreamSession::ConnectedChanged, this, &StatsOverlayWidget::refresh);
+#ifdef PS5LINK_BUILD
+            connect(current_session, &StreamSession::RecoveryStatsChanged, this, &StatsOverlayWidget::refresh);
+#endif
         }
     }
 
@@ -246,13 +304,14 @@ public:
 
         bitrateRow->setVisible(hasSession);
         if (hasSession)
-            bitrateValue->setText(QString::number(session->GetMeasuredBitrate(), 'f', 1));
+            bitrateValue->setText(tr("%1 Mbps").arg(session->GetMeasuredBitrate(), 0, 'f', 1));
         else
             bitrateValue->clear();
 
-        queueRow->setVisible(true);
+        const bool mainRenderer = target == owner;
+        queueRow->setVisible(mainRenderer);
         queueDepthValue->setText(QString::number(owner ? owner->queueDepthAverage() : 0.0, 'f', 1));
-        pendingRow->setVisible(true);
+        pendingRow->setVisible(mainRenderer);
         pendingAgeValue->setText(tr("%1 ms").arg((owner ? owner->pendingFrameAge() : 0.0) * 1000.0, 0, 'f', 0));
 
         packetLossRow->setVisible(hasSession);
@@ -265,17 +324,66 @@ public:
 
         const int droppedFrames = owner ? owner->droppedFrames() : 0;
         droppedFramesValue->setText(QString::number(droppedFrames));
-        droppedFramesRow->setVisible(droppedFrames > 0);
+        droppedFramesRow->setVisible(mainRenderer && droppedFrames > 0);
 
         lostFramesRow->setVisible(hasSession);
         if (hasSession)
             lostFramesValue->setText(QString::number(session->GetFramesLost()));
         else
             lostFramesValue->clear();
+#ifdef PS5LINK_BUILD
+        decodedFpsRow->setVisible(hasSession);
+        submittedFpsRow->setVisible(hasSession);
+        generatedFpsRow->setVisible(hasSession && !mainRenderer);
+        const auto recovery = session ? session->GetRecoveryStats() : QString();
+        recoveryValue->setText(recovery);
+        recoveryValue->setVisible(!recovery.isEmpty());
+        const bool activeVsr = owner && owner->rtxVsrActive();
+        vsrValue->setText(tr("RTX VSR active"));
+        vsrValue->setVisible(mainRenderer && activeVsr);
+#endif
     }
 
 private:
+#ifdef PS5LINK_BUILD
+    void resetFpsSample()
+    {
+        lastFrameCounts = backend ? backend->frameCounts() : QmlBackend::FrameCounts{};
+        fpsClock.start();
+        for(auto *value : {decodedFpsValue, submittedFpsValue, generatedFpsValue})
+            value->setText(QStringLiteral("—"));
+    }
+
+    void sampleFps()
+    {
+        if(!backend || !current_session)
+            return;
+        const auto counts = backend->frameCounts();
+        const double seconds = fpsClock.nsecsElapsed() / 1000000000.0;
+        if(seconds <= 0 || counts.submitted < lastFrameCounts.submitted || counts.generated < lastFrameCounts.generated)
+        {
+            resetFpsSample();
+            return;
+        }
+        decodedFpsValue->setText(QString::number((counts.decoded - lastFrameCounts.decoded) / seconds, 'f', 1));
+        submittedFpsValue->setText(QString::number((counts.submitted - lastFrameCounts.submitted) / seconds, 'f', 1));
+        generatedFpsValue->setText(QString::number((counts.generated - lastFrameCounts.generated) / seconds, 'f', 1));
+        lastFrameCounts = counts;
+        fpsClock.start();
+    }
+
+    QTimer fpsTimer;
+    QElapsedTimer fpsClock;
+    QmlBackend::FrameCounts lastFrameCounts;
+    QWidget *decodedFpsRow = nullptr;
+    QWidget *submittedFpsRow = nullptr;
+    QWidget *generatedFpsRow = nullptr;
+    QLabel *decodedFpsValue = nullptr;
+    QLabel *submittedFpsValue = nullptr;
+    QLabel *generatedFpsValue = nullptr;
+#endif
     QPointer<QmlMainWindow> owner;
+    QPointer<QWindow> target;
     QPointer<QmlBackend> backend;
     QPointer<StreamSession> current_session;
     QWidget *bitrateRow = nullptr;
@@ -290,6 +398,10 @@ private:
     QLabel *packetLossValue = nullptr;
     QLabel *droppedFramesValue = nullptr;
     QLabel *lostFramesValue = nullptr;
+#ifdef PS5LINK_BUILD
+    QLabel *recoveryValue = nullptr;
+    QLabel *vsrValue = nullptr;
+#endif
 };
 
 class DeferredPresentPacerThread final : public QThread
@@ -2527,9 +2639,10 @@ private:
     QWindow *window = {};
 };
 
-QmlMainWindow::QmlMainWindow(Settings *settings, bool exit_app_on_stream_exit)
+QmlMainWindow::QmlMainWindow(Settings *settings, bool exit_app_on_stream_exit, bool direct_stream)
     : QWindow()
     , settings(settings)
+    , direct_stream(direct_stream)
 {
     init(settings, exit_app_on_stream_exit);
 }
@@ -2618,6 +2731,9 @@ QmlMainWindow::~QmlMainWindow()
     }
 #endif
 
+#ifdef PS5LINK_BUILD
+    rtx_vsr.reset();
+#endif
     if (pl_gpu gpu = placeboGpu()) {
         pl_unmap_avframe(gpu, &direct_frame);
         if (quick_tex)
@@ -2878,12 +2994,18 @@ void QmlMainWindow::setVideoPreset(VideoPreset preset)
 void QmlMainWindow::setSettings(Settings *new_settings)
 {
     settings = new_settings;
+#ifdef PS5LINK_BUILD
+    rtx_vsr_quality.storeRelaxed(qBound(0, settings->GetRtxVsrQuality(), 4));
+    emit rtxVsrQualityChanged();
+#endif
     QString profile = settings->GetCurrentProfile();
     qCCritical(chiakiGui) << "Current Profile: " << profile;
-    if(profile.isEmpty())
-        QGuiApplication::setApplicationDisplayName("chiaki-ng");
-    else
-        QGuiApplication::setApplicationDisplayName(QString("chiaki-ng:%1").arg(profile));
+#ifdef PS5LINK_BUILD
+    const QString appName = QStringLiteral("PS5Link");
+#else
+    const QString appName = QStringLiteral("chiaki-ng");
+#endif
+    QGuiApplication::setApplicationDisplayName(profile.isEmpty() ? appName : appName + ":" + profile);
     this->setTitle(QGuiApplication::applicationDisplayName());
 }
 
@@ -2898,33 +3020,71 @@ void QmlMainWindow::show()
 
     QVariantMap props;
     props[QStringLiteral("parent")] = QVariant::fromValue(quick_window->contentItem());
+#ifdef PS5LINK_BUILD
+    props[QStringLiteral("quickLaunch")] = qGuiApp->property("ps5linkQuickConnect").toBool();
+#endif
     quick_item = qobject_cast<QQuickItem*>(component.createWithInitialProperties(props));
     if (!quick_item) {
         qCCritical(chiakiGui) << "Failed to create root item\n" << component.errors();
         QMetaObject::invokeMethod(QGuiApplication::instance(), &QGuiApplication::quit, Qt::QueuedConnection);
         return;
     }
+#ifdef PS5LINK_BUILD
+    if (qGuiApp->property("ps5linkOpenAdvancedSettings").toBool()) {
+        qGuiApp->setProperty("ps5linkOpenAdvancedSettings", false);
+        QMetaObject::invokeMethod(quick_item, "showAdvancedSettings", Qt::QueuedConnection);
+    }
+#endif
     if (!pending_renderer_fallback_reason.isEmpty()) {
         const QString reason = pending_renderer_fallback_reason;
         pending_renderer_fallback_reason.clear();
         QMetaObject::invokeMethod(quick_item, "showRendererFallbackDialog",
                                   Q_ARG(QVariant, QVariant::fromValue(reason)));
     }
-    auto screen_size = QGuiApplication::primaryScreen()->availableSize();
-    resize(screen_size);
-
     if (qEnvironmentVariable("XDG_CURRENT_DESKTOP") == "gamescope")
+    {
+        resize(QGuiApplication::primaryScreen()->availableSize());
         fullscreenTime();
+    }
     else
     {
-        if(!settings->GetGeometry().isEmpty())
+        restoreClientWindow();
+        setWindowAdjustable(true);
+    }
+}
+
+void QmlMainWindow::restoreClientWindow()
+{
+    QRect geometry = settings->GetGeometry();
+#ifdef PS5LINK_BUILD
+    QScreen *targetScreen = QGuiApplication::screenAt(geometry.center());
+    if (!targetScreen)
+        targetScreen = screen() ? screen() : QGuiApplication::primaryScreen();
+    const QRect available = targetScreen->availableGeometry();
+    if (geometry.isEmpty() || !available.intersects(geometry))
+    {
+        geometry.setSize(QSize(710, 530).boundedTo(available.size()));
+        geometry.moveCenter(available.center());
+    }
+#endif
+    if (geometry.isEmpty())
+        showMaximized();
+    else
+    {
+        if (isVisible())
         {
-            setGeometry(settings->GetGeometry());
+            const bool restoreMinimum = windowState() == Qt::WindowFullScreen;
             showNormal();
+            if (restoreMinimum)
+                setMinimumSize(QSize(0, 0));
+            setGeometry(geometry);
         }
         else
-            showMaximized();
-        setWindowAdjustable(true);
+        {
+            setGeometry(geometry);
+            showNormal();
+        }
+        normalTime();
     }
 }
 
@@ -4696,6 +4856,89 @@ int QmlMainWindow::pendingFrameOverflowLimit(int submission_depth_limit) const
     return 2;
 }
 
+bool QmlMainWindow::rtxVsrAvailable() const
+{
+#ifdef PS5LINK_BUILD
+    const auto path = QCoreApplication::applicationDirPath();
+    return render_backend == RenderBackend::Vulkan && QFileInfo::exists(path + "/PS5LinkVsr.dll")
+        && QFileInfo::exists(path + "/nvngx_vsr.dll");
+#else
+    return false;
+#endif
+}
+
+int QmlMainWindow::rtxVsrQuality() const
+{
+#ifdef PS5LINK_BUILD
+    return rtx_vsr_quality.loadRelaxed();
+#else
+    return 0;
+#endif
+}
+
+void QmlMainWindow::setRtxVsrQuality(int quality)
+{
+#ifdef PS5LINK_BUILD
+    quality = qBound(0, quality, 4);
+    if(rtx_vsr_quality.fetchAndStoreRelaxed(quality) == quality)
+        return;
+    settings->SetRtxVsrQuality(quality);
+    settings->Sync();
+    emit rtxVsrQualityChanged();
+    scheduleUpdate(false, UpdateRequestReason::SceneChanged);
+#else
+    Q_UNUSED(quality)
+#endif
+}
+
+bool QmlMainWindow::rtxVsrActive() const
+{
+#ifdef PS5LINK_BUILD
+    return rtx_vsr_active.loadRelaxed() != 0;
+#else
+    return false;
+#endif
+}
+
+#ifdef PS5LINK_BUILD
+void QmlMainWindow::setExternalStatsTarget(QWindow *target)
+{
+    if(!stats_overlay_widget)
+        return;
+    stats_overlay_widget->setTarget(target);
+    setStatsOverlayActive(target && (settings->GetShowStreamStats() || qApp->property("ps5linkPsnTestSeconds").toInt() > 0));
+}
+
+void QmlMainWindow::showReplayMenu()
+{
+    if(!quick_item)
+        return;
+    QMetaObject::invokeMethod(quick_item, "showStreamView");
+    emit menuRequested();
+}
+
+void QmlMainWindow::showFullStreamSettings()
+{
+    if(!quick_item)
+        return;
+    if(!isVisible())
+        show();
+    raise();
+    requestActivate();
+    QMetaObject::invokeMethod(quick_item, "showFullStreamSettings");
+}
+
+void QmlMainWindow::returnToExternalStream()
+{
+    backend->activateDx12Output();
+}
+
+bool QmlMainWindow::prepareReplayFrame(ChiakiFfmpegFrame &frame)
+{
+    return backend->prepareFrameForPresentation(frame, render_backend == RenderBackend::OpenGL);
+}
+#endif
+
 AVBufferRef *QmlMainWindow::vulkanHwDeviceCtx()
 {
     if (render_backend != RenderBackend::Vulkan)
@@ -4981,13 +5224,16 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
 
         const char *opt_extensions[] = {
             VK_EXT_HDR_METADATA_EXTENSION_NAME,
+#ifdef PS5LINK_BUILD
+            VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
+#endif
         };
 
         struct pl_vk_inst_params vk_inst_params = {
             .extensions = vk_exts,
             .num_extensions = 2,
             .opt_extensions = opt_extensions,
-            .num_opt_extensions = 1,
+            .num_opt_extensions = static_cast<int>(std::size(opt_extensions)),
         };
         placebo_vk_inst = pl_vk_inst_create(placebo_log, &vk_inst_params);
         if (!placebo_vk_inst) {
@@ -5022,6 +5268,12 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
             VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,
             VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,
             VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,
+#ifdef PS5LINK_BUILD
+            VK_NVX_BINARY_IMPORT_EXTENSION_NAME,
+            VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME,
+            VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
+            VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
+#endif
         };
 
         struct pl_vulkan_params vulkan_params = {
@@ -5031,7 +5283,7 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
             PL_VULKAN_DEFAULTS
             .extra_queues = VK_QUEUE_VIDEO_DECODE_BIT_KHR,
             .opt_extensions = opt_dev_extensions,
-            .num_opt_extensions = 4,
+            .num_opt_extensions = static_cast<int>(std::size(opt_dev_extensions)),
         };
         placebo_vulkan = pl_vulkan_create(placebo_log, &vulkan_params);
         if (!placebo_vulkan) {
@@ -5129,6 +5381,13 @@ renderer_backend_ready:
     quick_render = new RenderControl(this);
 
     QQuickWindow::setDefaultAlphaBuffer(true);
+#ifdef PS5LINK_BUILD
+    const auto qualityOverride = qApp->property("ps5linkVsrQuality");
+    rtx_vsr_quality.storeRelaxed(qBound(0, qualityOverride.isValid()
+        ? qualityOverride.toInt() : settings->GetRtxVsrQuality(), 4));
+    if(rtxVsrQuality() && render_backend != RenderBackend::Vulkan)
+        qWarning() << "[RTX VSR] Using regular scaling because Vulkan is unavailable";
+#endif
     QQuickWindow::setGraphicsApi(render_backend == RenderBackend::Vulkan ? QSGRendererInterface::Vulkan : QSGRendererInterface::OpenGL);
     quick_window = new QQuickWindow(quick_render);
     if (render_backend == RenderBackend::Vulkan) {
@@ -5265,15 +5524,7 @@ renderer_backend_ready:
             setStreamMaxFPS(60);
             setStreamWindowAdjustable(false);
             if(qEnvironmentVariable("XDG_CURRENT_DESKTOP") != "gamescope")
-            {
-                if(!this->settings->GetGeometry().isEmpty())
-                {
-                    setGeometry(this->settings->GetGeometry());
-                    normalTime();
-                }
-                else
-                    showMaximized();
-            }
+                restoreClientWindow();
             scheduleUpdate(true, UpdateRequestReason::SceneChanged);
         }
     });
@@ -5758,6 +6009,10 @@ void QmlMainWindow::processDeferredSwapTask(qint64 submit_begin_us,
             qCWarning(chiakiGui) << "Failed to submit Placebo frame on deferred thread!";
         else {
             confirmVulkanStartup();
+#ifdef PS5LINK_BUILD
+            if(stream_session_active.loadRelaxed())
+                submitted_frames.fetchAndAddRelaxed(1);
+#endif
             const qint64 submit_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
             logLatencyStats("pl_swapchain_submit_frame", submit_us - submit_call_begin_us);
             CHIAKI_NOISY_DEBUG().nospace()
@@ -7152,6 +7407,10 @@ void QmlMainWindow::render()
                     qCWarning(chiakiGui) << "Failed to submit Placebo frame!";
                 else {
                     confirmVulkanStartup();
+#ifdef PS5LINK_BUILD
+                    if(present && stream_session_active.loadRelaxed())
+                        submitted_frames.fetchAndAddRelaxed(1);
+#endif
                     submit_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
             logLatencyStats("pl_swapchain_submit_frame", submit_us - submit_begin_us);
             CHIAKI_NOISY_DEBUG().nospace()
@@ -7614,7 +7873,19 @@ void QmlMainWindow::render()
         logLatencyStats("render_prep", render_call_begin_us - render_entry_us_local);
     if (render_call_begin_us >= render_setup_begin_us)
         logRenderSetupStats(render_call_begin_us, render_call_begin_us - render_setup_begin_us);
-    if (!(bypass_frame_queue
+    bool vsr_rendered = false;
+#ifdef PS5LINK_BUILD
+    const int vsrQuality = (backend && backend->hasDx12Output()) ? 0 : rtxVsrQuality();
+    if(vsrQuality && placebo_vulkan && hint_frame && video_mode == VideoMode::Normal)
+    {
+        if(!rtx_vsr)
+            rtx_vsr = std::make_unique<RtxVsrPass>(placebo_vulkan);
+        vsr_rendered = rtx_vsr->render(placebo_renderer, *hint_frame, target_frame, params, vsrQuality);
+    }
+    if(rtx_vsr_active.fetchAndStoreRelaxed(vsr_rendered) != static_cast<int>(vsr_rendered))
+        QMetaObject::invokeMethod(this, &QmlMainWindow::rtxVsrActiveChanged, Qt::QueuedConnection);
+#endif
+    if (!vsr_rendered && !(bypass_frame_queue
         ? pl_render_image(placebo_renderer, &direct_render_frame, &target_frame, &params)
         : pl_render_image_mix(placebo_renderer, &frame_mix, &target_frame, &params)))
     {
@@ -7679,9 +7950,27 @@ bool QmlMainWindow::handleShortcut(QKeyEvent *event)
             session->ToggleMute();
         return true;
     case Qt::Key_O:
+#ifdef PS5LINK_BUILD
+        if(backend->toggleDx12Menu())
+            return true;
+#endif
         emit menuRequested();
         return true;
     case Qt::Key_Q:
+#ifdef PS5LINK_BUILD
+        if (event->modifiers().testFlag(Qt::ShiftModifier)) {
+            if (session && backend) {
+                const auto action = settings->GetDisconnectAction();
+                if (action == DisconnectAction::AlwaysSleep)
+                    backend->stopSession(true);
+                else if (action == DisconnectAction::AlwaysNothing)
+                    backend->stopSession(false);
+                else if (!backend->toggleDx12Menu())
+                    emit backend->sessionStopDialogRequested();
+            }
+            return true;
+        }
+#endif
 #ifndef Q_OS_MACOS
         close();
 #endif
@@ -7782,14 +8071,14 @@ bool QmlMainWindow::event(QEvent *event)
                 QMetaObject::invokeMethod(quick_render, std::bind(&QmlMainWindow::destroySwapchain, this), Qt::BlockingQueuedConnection);
         break;
     case QEvent::Move:
-        if(!session && isWindowAdjustable())
+        if(!session && isWindowAdjustable() && windowState() == Qt::WindowNoState)
             settings->SetGeometry(geometry());
         else if(session && settings->GetWindowType() == WindowType::AdjustableResolution && isStreamWindowAdjustable())
             settings->SetStreamGeometry(geometry());
         updateStatsOverlayGeometry();
         break;
     case QEvent::Resize:
-        if(!session && isWindowAdjustable())
+        if(!session && isWindowAdjustable() && windowState() == Qt::WindowNoState)
             settings->SetGeometry(geometry());
         else if(session && settings->GetWindowType() == WindowType::AdjustableResolution && isStreamWindowAdjustable())
             settings->SetStreamGeometry(geometry());
