@@ -2,6 +2,7 @@
 
 #include <chiaki/controller.h>
 #include <chiaki/orientation.h>
+#include <ds5btidle.h>
 
 #include <atomic>
 #include <cstddef>
@@ -22,6 +23,9 @@ public:
 	// Periodically scans Windows Bluetooth HID devices and connects automatically
 	// when a DualSense (0x0CE6) or DualSense Edge (0x0DF2) is paired over Bluetooth.
 	void startDiscovery(bool waitForInitialScan = false);
+	void startPassiveIdleMonitor();
+	void setIdlePolicy(Ds5BtIdlePolicy policy);
+	void setStreaming(bool streaming);
 
 	// Shuts down worker threads and releases Bluetooth HID handles.
 	void shutdown();

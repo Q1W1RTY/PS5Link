@@ -51,3 +51,11 @@ if(PS5LINK_BUILD AND MINGW)
         "-Wl,--wrap=chiaki_time_now_monotonic_us")
     add_test(NAME ps5link-receiver COMMAND ps5link-receiver-test)
 endif()
+
+
+if(PS5LINK_BUILD)
+    add_executable(ps5link-controller-idle-test ds5btidle.cpp)
+    target_compile_features(ps5link-controller-idle-test PRIVATE cxx_std_17)
+    target_include_directories(ps5link-controller-idle-test PRIVATE "${CMAKE_SOURCE_DIR}/gui/include")
+    add_test(NAME ps5link-controller-idle COMMAND ps5link-controller-idle-test)
+endif()

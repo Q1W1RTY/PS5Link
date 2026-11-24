@@ -152,6 +152,18 @@ internal sealed class AdvancedWindow : Window
             (0, T("Выкл.", "Off")), (1, T("Очень слабая", "Very weak")), (2, T("Слабая", "Weak")),
             (3, T("Обычная", "Normal")), (4, T("Сильная", "Strong")), (5, T("Очень сильная", "Very strong")));
 
+        control.Children.Add(Heading(T("Автоотключение DualSense по Bluetooth", "DualSense Bluetooth auto-disconnect")));
+        var autoDisconnect = Toggle(control, "GamepadIdleEnabled", T("Отключать при бездействии", "Disconnect when idle"));
+        var intervals = new[] { 0, 1, 5, 10, 15, 30, 60 }.Select(minutes =>
+            (minutes, minutes == 0 ? T("Никогда", "Never") : T($"{minutes} мин", $"{minutes} min"))).ToArray();
+        var desktopIdle = Select(control, "GamepadIdleDesktop", T("Вне стрима", "Outside a stream"), intervals);
+        var streamIdle = Select(control, "GamepadIdleStream", T("Во время стрима", "During a stream"), intervals);
+        var chargingIdle = Toggle(control, "GamepadIdleKeepCharging", T("Не отключать во время зарядки", "Keep connected while charging"));
+        void UpdateIdleControls() =>
+            desktopIdle.IsEnabled = streamIdle.IsEnabled = chargingIdle.IsEnabled = autoDisconnect.IsChecked == true;
+        autoDisconnect.IsCheckedChanged += (_, _) => UpdateIdleControls();
+        UpdateIdleControls();
+
         tabs.ItemsSource = new[]
         {
             Page(T("Стрим", "Stream"), stream),
@@ -370,15 +382,16 @@ internal sealed class AdvancedWindow : Window
         page.Children.Add(row);
     }
 
-    private void Toggle(StackPanel page, string key, string label)
+    private ToggleSwitch Toggle(StackPanel page, string key, string label)
     {
         var control = new ToggleSwitch { IsChecked = profile.Advanced[key]?.GetValue<bool>() == true,
             HorizontalAlignment = HorizontalAlignment.Right, OnContent = "", OffContent = "" };
         AddLabel(page, label, control);
         editors.Add(key, () => JsonValue.Create(control.IsChecked == true));
+        return control;
     }
 
-    private void Select(StackPanel page, string key, string label, params (int Value, string Caption)[] options)
+    private ComboBox Select(StackPanel page, string key, string label, params (int Value, string Caption)[] options)
     {
         var choices = options.Select(item => new Choice(item.Value, item.Caption)).ToArray();
         int value = profile.Advanced[key]?.GetValue<int>() ?? choices[0].Value;
@@ -390,6 +403,7 @@ internal sealed class AdvancedWindow : Window
         };
         AddLabel(page, label, control);
         editors.Add(key, () => control.SelectedItem is Choice item ? JsonValue.Create(item.Value) : null);
+        return control;
     }
 
     private void Integer(StackPanel page, string key, string label, int min, int max, int step)

@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.10.3',
+    [string]$Version = '1.10.4',
     [string]$MsysRoot = 'C:\msys64',
     [string]$Iscc
 )
@@ -32,7 +32,7 @@ try {
     $env:MSYSTEM = 'MINGW64'
     $env:CHERE_INVOKING = '1'
     $env:PS5LINK_RELEASE_STAGE = $stage
-    & $bash -lc 'set -e; stage=$(cygpath -u "$PS5LINK_RELEASE_STAGE"); build=build-offline/release/client; cmake -S . -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DPS5LINK_BUILD=ON -DCHIAKI_ENABLE_CLI=OFF -DCHIAKI_ENABLE_STEAMDECK_NATIVE=OFF -DCHIAKI_ENABLE_FFMPEG_DECODER=ON -DCHIAKI_USE_SYSTEM_CURL=OFF -DBUILD_SHARED_LIBS=OFF; cmake --build "$build" --target chiaki chiaki-unit ps5link-receiver-test; ctest --test-dir "$build" --output-on-failure; bash scripts/deploy-windows-msys2.sh "$stage" "$build/gui/PS5Link.exe" "$PWD/$build/third-party/cpp-steam-tools" /mingw64 gui/src/qml; bash scripts/collect-windows-notices.sh "$stage"'
+    & $bash -lc 'set -e; stage=$(cygpath -u "$PS5LINK_RELEASE_STAGE"); build=build-offline/release/client; cmake -S . -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DPS5LINK_BUILD=ON -DCHIAKI_ENABLE_CLI=OFF -DCHIAKI_ENABLE_STEAMDECK_NATIVE=OFF -DCHIAKI_ENABLE_FFMPEG_DECODER=ON -DCHIAKI_USE_SYSTEM_CURL=OFF -DBUILD_SHARED_LIBS=OFF; cmake --build "$build" --target chiaki chiaki-unit ps5link-receiver-test ps5link-controller-idle-test; ctest --test-dir "$build" --output-on-failure; bash scripts/deploy-windows-msys2.sh "$stage" "$build/gui/PS5Link.exe" "$PWD/$build/third-party/cpp-steam-tools" /mingw64 gui/src/qml; bash scripts/collect-windows-notices.sh "$stage"'
     if ($LASTEXITCODE -ne 0) { throw 'Client build, tests, or staging failed.' }
 
     dotnet publish gui/launcher/PS5Link.Launcher.csproj -c Release -o $launcher --nologo "-p:Version=$Version" -p:DebugType=none -p:DebugSymbols=false

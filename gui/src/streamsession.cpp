@@ -790,6 +790,9 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 		ControllerManager::GetInstance()->SetPollingIntervalMs(connect_info.settings->GetControllerPollingMs());
 #ifdef _WIN32
 		Ds5BtManager::instance().setSpeakerAudioEnabled(connect_info.settings->GetBtSpeakerAudio());
+		Ds5BtManager::instance().setIdlePolicy({connect_info.settings->GetGamepadIdleEnabled(),
+			connect_info.settings->GetGamepadIdleDesktop(), connect_info.settings->GetGamepadIdleStream(),
+			connect_info.settings->GetGamepadIdleKeepCharging()});
 #endif
 	}
 #endif
@@ -812,6 +815,8 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 StreamSession::~StreamSession()
 {
 #if defined(PS5LINK_BUILD) && defined(_WIN32)
+	if(session_started)
+		Ds5BtManager::instance().setStreaming(false);
 	Ds5BtManager::instance().setMicAudioCallback(nullptr);
 	Ds5BtManager::instance().setMicState(false, true);
 #endif
@@ -931,6 +936,9 @@ void StreamSession::Start()
 		throw ChiakiException("Chiaki Session Start failed");
 	}
 	session_started = true;
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	Ds5BtManager::instance().setStreaming(true);
+#endif
 }
 
 void StreamSession::Stop()

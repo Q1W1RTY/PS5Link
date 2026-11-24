@@ -317,6 +317,15 @@ class Settings : public QObject
             return (ms == 1 || ms == 2 || ms == 4 || ms == 8) ? ms : 4;
         }
         void SetControllerPollingMs(int ms) { settings.setValue("settings/controller_polling_ms", qBound(1, ms, 8)); }
+        bool GetGamepadIdleEnabled() const { return settings.value("settings/gamepad_idle_enabled", true).toBool(); }
+        void SetGamepadIdleEnabled(bool enabled) { settings.setValue("settings/gamepad_idle_enabled", enabled); }
+        int GetGamepadIdleDesktop() const;
+        void SetGamepadIdleDesktop(int minutes) { settings.setValue("settings/gamepad_idle_desktop", minutes); }
+        int GetGamepadIdleStream() const;
+        void SetGamepadIdleStream(int minutes) { settings.setValue("settings/gamepad_idle_stream", minutes); }
+        bool GetGamepadIdleKeepCharging() const { return settings.value("settings/gamepad_idle_keep_charging", false).toBool(); }
+        void SetGamepadIdleKeepCharging(bool enabled) { settings.setValue("settings/gamepad_idle_keep_charging", enabled); }
+        static int RunLauncherIdleMonitor(const QString &profile, unsigned long parentPid);
         bool GetGamepadQuitHotkey() const { return settings.value("settings/gamepad_quit_hotkey", false).toBool(); }
         void SetGamepadQuitHotkey(bool enabled) { settings.setValue("settings/gamepad_quit_hotkey", enabled); }
         bool GetEnableRumble() const { return settings.value("settings/enable_rumble", true).toBool(); }

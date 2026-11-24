@@ -1,6 +1,9 @@
 #include <ps5link.h>
 #ifdef PS5LINK_BUILD
 #include <dx12replay.h>
+#ifdef _WIN32
+#include <ds5bt.h>
+#endif
 #include <cstdio>
 #endif
 #include "qmlbackend.h"
@@ -293,6 +296,10 @@ QmlBackend::QmlBackend(Settings *settings, QmlMainWindow *window)
     , settings_qml(new QmlSettings(settings, this))
     , window(window)
 {
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+    Ds5BtManager::instance().setIdlePolicy({settings->GetGamepadIdleEnabled(), settings->GetGamepadIdleDesktop(),
+        settings->GetGamepadIdleStream(), settings->GetGamepadIdleKeepCharging()});
+#endif
     qt_msg_handler = qInstallMessageHandler(msg_handler);
 
     const char *uri = "org.streetpea.chiaking";
@@ -702,6 +709,10 @@ void QmlBackend::profileChanged()
         settings->deleteLater();
     settings_allocd = true;
     settings = settings_copy;
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+    Ds5BtManager::instance().setIdlePolicy({settings->GetGamepadIdleEnabled(), settings->GetGamepadIdleDesktop(),
+        settings->GetGamepadIdleStream(), settings->GetGamepadIdleKeepCharging()});
+#endif
     emit hostsChanged();
     updateControllerMappings();
     connect(settings, &Settings::RegisteredHostsUpdated, this, &QmlBackend::hostsChanged);

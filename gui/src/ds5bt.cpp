@@ -6,6 +6,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <bluetoothapis.h>
+#include <winioctl.h>
 #include <cfgmgr32.h>
 #include <hidsdi.h>
 #include <setupapi.h>
@@ -203,6 +205,58 @@ std::string extractBluetoothAddressFromText(const std::string &text)
 	return {};
 }
 
+// The HID path can also contain controller or adapter IDs. Only use a
+// Bluetooth device ancestor as the target of the OS disconnect request.
+uint64_t bluetoothDeviceAddress(DEVINST device)
+{
+	constexpr char prefix[] = "bthenum\\dev_";
+	for(unsigned depth = 0; depth < 16; ++depth)
+	{
+		char id[MAX_DEVICE_ID_LEN]{};
+		if(CM_Get_Device_IDA(device, id, MAX_DEVICE_ID_LEN, 0) != CR_SUCCESS)
+			break;
+		const auto name = toLowerAscii(id);
+		constexpr size_t start = sizeof(prefix) - 1;
+		if(name.compare(0, start, prefix) == 0 && name.size() > start + 12 && name[start + 12] == '\\'
+			&& std::all_of(name.begin() + start, name.begin() + start + 12, isHexChar))
+			return std::stoull(name.substr(start, 12), nullptr, 16);
+
+		DEVINST parent;
+		if(CM_Get_Parent(&parent, device, 0) != CR_SUCCESS)
+			break;
+		device = parent;
+	}
+	return 0;
+}
+
+bool requestBluetoothDisconnect(uint64_t address, const std::function<bool()> &stillIdle)
+{
+	// Windows SDK bthioctl.h is not shipped by the MinGW headers.
+	constexpr DWORD disconnectDevice = CTL_CODE(FILE_DEVICE_BLUETOOTH, 3, METHOD_BUFFERED, FILE_ANY_ACCESS);
+	BLUETOOTH_FIND_RADIO_PARAMS params{sizeof(params)};
+	HANDLE radio = nullptr;
+	const auto finder = BluetoothFindFirstRadio(&params, &radio);
+	if(!finder)
+		return false;
+
+	bool requested = false;
+	do
+	{
+		BLUETOOTH_DEVICE_INFO device{};
+		device.dwSize = sizeof(device);
+		device.Address.ullLong = address;
+		if(BluetoothGetDeviceInfo(radio, &device) == ERROR_SUCCESS && device.fConnected && stillIdle())
+		{
+			DWORD returned = 0;
+			requested = DeviceIoControl(radio, disconnectDevice, &address, sizeof(address),
+				nullptr, 0, &returned, nullptr) != FALSE;
+		}
+		CloseHandle(radio);
+	} while(!requested && BluetoothFindNextRadio(finder, &radio));
+	BluetoothFindRadioClose(finder);
+	return requested;
+}
+
 class AudioThreadPriorityGuard
 {
 public:
@@ -383,6 +437,11 @@ struct Ds5BtManager::Impl
 	bool discoveryStop = false;
 	bool discoveryRequested = false;
 	bool initialDiscoveryDone = false;
+	bool passive = false;
+	bool streaming = false;
+	Ds5BtIdlePolicy idlePolicy{false};
+	Ds5BtIdleTimer idleTimer;
+	uint64_t idleDeviceAddress = 0;
 	bool pausedExternalBridge = false;
 	std::atomic<bool> usbDualSensePresent{false};
 
@@ -861,14 +920,31 @@ struct Ds5BtManager::Impl
 			}
 
 			if(bytesRead == kBtInputReportSize && raw[0] == kBtReport31)
-			{
 				handleBluetoothInputReport31(raw.data(), bytesRead);
-			}
+			else if(passive && (bytesRead == 10 || bytesRead == kBtInputReportSize) && raw[0] == 0x01)
+				handleSimpleIdleReport(raw.data());
 		}
 
 		CloseHandle(ov.hEvent);
 		connected.store(false, std::memory_order_release);
 		requestDiscovery();
+	}
+
+	void handleSimpleIdleReport(const uint8_t *raw)
+	{
+		// Basic Bluetooth reports put the buttons before the triggers, and
+		// carry a packet counter in the upper bits of the third button byte.
+		const bool buttons = (raw[5] & 0x0fu) < 8 || (raw[5] & 0xf0u) || raw[6] || (raw[7] & 0x07u);
+		const bool sticks = std::any_of(raw + 1, raw + 5,
+			[](uint8_t axis) { return std::abs(int(axis) - 128) >= 16; });
+		const bool triggers = raw[8] >= 8 || raw[9] >= 8;
+		std::lock_guard<std::mutex> lock(mutex);
+		if(idlePolicy.enabled)
+		{
+			// Basic reports do not carry battery telemetry. Honor charging
+			// protection conservatively until an enhanced report is seen.
+			idleTimer.observe(Ds5BtIdleTimer::Clock::now(), buttons || sticks || triggers, idlePolicy.keepWhileCharging);
+		}
 	}
 
 	void handleBluetoothInputReport31(const uint8_t *raw, size_t len)
@@ -889,7 +965,7 @@ struct Ds5BtManager::Impl
 		if(payloadType == 0x02)
 		{
 			// Bluetooth Microphone Opus frame (71 bytes at packet[4..74])
-			if(!micDecoder)
+			if(passive || !micDecoder)
 				return;
 			std::array<int16_t, kOpusFrameSamples> monoPcm{};
 			const int decoded = opus_decode(
@@ -928,6 +1004,21 @@ struct Ds5BtManager::Impl
 		const bool isFull = (chargeState == 0x02);
 		const bool isChg = (chargeState == 0x01);
 		const int pct = isFull ? 100 : std::min(100, static_cast<int>(std::min<uint8_t>(rawBat, 10)) * 10 + 5);
+		const bool activeButtons = (u[8] & 0x0fu) < 8 || (u[8] & 0xf0u) || u[9] || (u[10] & 0xf7u);
+		const bool activeSticks = std::any_of(u.begin() + 1, u.begin() + 5,
+			[](uint8_t axis) { return std::abs(int(axis) - 128) >= 16; });
+		const bool activeTriggers = u[5] >= 8 || u[6] >= 8;
+		const bool activeTouch = !(u[33] & 0x80u) || !(u[37] & 0x80u);
+		const bool activeMotion = std::abs(int(readLe16Signed(&u[16]))) >= 512
+			|| std::abs(int(readLe16Signed(&u[18]))) >= 512 || std::abs(int(readLe16Signed(&u[20]))) >= 512;
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			if(idlePolicy.enabled)
+				idleTimer.observe(Ds5BtIdleTimer::Clock::now(),
+					activeButtons || activeSticks || activeTriggers || activeTouch || activeMotion, isChg);
+		}
+		if(passive)
+			return;
 		batteryPct.store(pct, std::memory_order_relaxed);
 		charging.store(isChg, std::memory_order_relaxed);
 		fullCharge.store(isFull, std::memory_order_relaxed);
@@ -1330,6 +1421,8 @@ struct Ds5BtManager::Impl
 		{
 			std::lock_guard<std::mutex> lock(mutex);
 			btAddress.clear();
+			idleDeviceAddress = 0;
+			idleTimer = {};
 		}
 		batteryPct.store(-1, std::memory_order_relaxed);
 		charging.store(false, std::memory_order_relaxed);
@@ -1364,6 +1457,31 @@ struct Ds5BtManager::Impl
 			discoveryWake.wait_for(lock, std::chrono::seconds(3), [this] { return initialDiscoveryDone || discoveryStop; });
 	}
 
+	void checkIdleDisconnect()
+	{
+		uint64_t address;
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			address = idleDeviceAddress;
+		}
+		if(!address || !connected.load(std::memory_order_acquire) || usbDualSensePresent.load(std::memory_order_relaxed))
+			return;
+
+		const auto stillIdle = [&] {
+			std::lock_guard<std::mutex> lock(mutex);
+			return connected.load(std::memory_order_acquire) && !usbDualSensePresent.load(std::memory_order_relaxed)
+				&& idleDeviceAddress == address && idleTimer.expired(Ds5BtIdleTimer::Clock::now(), idlePolicy, streaming);
+		};
+		if(!stillIdle())
+			return;
+		const bool requested = requestBluetoothDisconnect(address, stillIdle);
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			idleTimer.restart(Ds5BtIdleTimer::Clock::now());
+		}
+		std::fprintf(stderr, "[PS5Link] Idle Bluetooth disconnect %s.\n", requested ? "requested" : "unavailable");
+	}
+
 	void discoveryLoop()
 	{
 		CM_NOTIFY_FILTER filter{};
@@ -1374,19 +1492,20 @@ struct Ds5BtManager::Impl
 		const bool subscribed = CM_Register_Notification(&filter, this, onHidChange, &notification) == CR_SUCCESS;
 
 		std::unique_lock<std::mutex> lock(discoveryMutex);
+		discoveryRequested = true;
 		while(!discoveryStop)
 		{
+			const bool scan = discoveryRequested || !subscribed || !connected.load(std::memory_order_acquire);
 			discoveryRequested = false;
 			lock.unlock();
-			scanDevices();
+			if(scan)
+				scanDevices();
+			checkIdleDisconnect();
 			lock.lock();
 			initialDiscoveryDone = true;
 			discoveryWake.notify_all();
 			const auto pending = [this] { return discoveryRequested || discoveryStop; };
-			if(subscribed && connected.load(std::memory_order_acquire))
-				discoveryWake.wait(lock, pending);
-			else
-				discoveryWake.wait_for(lock, std::chrono::milliseconds(900), pending);
+			discoveryWake.wait_for(lock, std::chrono::milliseconds(900), pending);
 		}
 		lock.unlock();
 		if(subscribed)
@@ -1403,7 +1522,7 @@ struct Ds5BtManager::Impl
 
 		// Ensure DS5LinkBridge service (if installed and running on this PC) is paused
 		// so it does not cloak the DualSense via HidHide or send conflicting BT reports.
-		if(!connected.load(std::memory_order_acquire) && !pausedExternalBridge)
+		if(!passive && !connected.load(std::memory_order_acquire) && !pausedExternalBridge)
 		{
 			std::string stateResp;
 			if(sendDs5LinkBridgeCommand("getState", &stateResp))
@@ -1430,6 +1549,7 @@ struct Ds5BtManager::Impl
 		std::string foundBtPath;
 		std::string foundBtAddress;
 		uint16_t foundBtPid = 0;
+		uint64_t foundIdleAddress = 0;
 		size_t foundOutLen = 0;
 		size_t foundFeatLen = 0;
 
@@ -1503,6 +1623,7 @@ struct Ds5BtManager::Impl
 				foundOutLen = caps.OutputReportByteLength;
 				foundFeatLen = caps.FeatureReportByteLength;
 				foundBtAddress = extractBluetoothAddressFromText(path);
+				foundIdleAddress = bluetoothDeviceAddress(devData.DevInst);
 			}
 		}
 
@@ -1518,7 +1639,7 @@ struct Ds5BtManager::Impl
 		// Open overlapped input/output handles and synchronous feature handle
 		HANDLE inH = CreateFileA(
 			foundBtPath.c_str(),
-			GENERIC_READ | GENERIC_WRITE,
+			passive ? GENERIC_READ : GENERIC_READ | GENERIC_WRITE,
 			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 			nullptr,
 			OPEN_EXISTING,
@@ -1526,6 +1647,26 @@ struct Ds5BtManager::Impl
 			nullptr);
 		if(inH == INVALID_HANDLE_VALUE)
 			return;
+
+		if(passive)
+		{
+			if(!foundIdleAddress)
+			{
+				CloseHandle(inH);
+				return;
+			}
+			inputHandle = inH;
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				idleDeviceAddress = foundIdleAddress;
+				idleTimer = {};
+			}
+			ResetEvent(stopEvent);
+			workerStop.store(false, std::memory_order_release);
+			connected.store(true, std::memory_order_release);
+			inputThread = std::thread([this]() { inputThreadLoop(); });
+			return;
+		}
 
 		HANDLE outH = CreateFileA(
 			foundBtPath.c_str(),
@@ -1568,6 +1709,8 @@ struct Ds5BtManager::Impl
 		{
 			std::lock_guard<std::mutex> lock(mutex);
 			btAddress = foundBtAddress;
+			idleDeviceAddress = foundIdleAddress;
+			idleTimer = {};
 			deviceName = (foundBtPid == kDualSenseEdgeProductId)
 				? "DualSense Edge Wireless Controller (Bluetooth)"
 				: "DualSense Wireless Controller (Bluetooth)";
@@ -1642,6 +1785,26 @@ Ds5BtManager::~Ds5BtManager()
 void Ds5BtManager::startDiscovery(bool waitForInitialScan)
 {
 	impl_->startDiscovery(waitForInitialScan);
+}
+
+void Ds5BtManager::startPassiveIdleMonitor()
+{
+	impl_->passive = true;
+	impl_->startDiscovery(false);
+}
+
+void Ds5BtManager::setIdlePolicy(Ds5BtIdlePolicy policy)
+{
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	impl_->idlePolicy = policy;
+	impl_->idleTimer.restart(Ds5BtIdleTimer::Clock::now());
+}
+
+void Ds5BtManager::setStreaming(bool streaming)
+{
+	std::lock_guard<std::mutex> lock(impl_->mutex);
+	impl_->streaming = streaming;
+	impl_->idleTimer.restart(Ds5BtIdleTimer::Clock::now());
 }
 
 void Ds5BtManager::shutdown()

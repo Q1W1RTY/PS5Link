@@ -119,7 +119,7 @@ if(PS5LINK_BUILD)
         ${ps5link_imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp
     )
     target_include_directories(chiaki PRIVATE ${ps5link_imgui_SOURCE_DIR} ${Opus_INCLUDE_DIRS})
-    target_link_libraries(chiaki crypt32 vulkan-1 d3d12 dxgi d3dcompiler avrt winmm setupapi hid cfgmgr32 ${Opus_LIBRARIES})
+    target_link_libraries(chiaki crypt32 vulkan-1 d3d12 dxgi d3dcompiler avrt winmm setupapi hid cfgmgr32 bthprops ${Opus_LIBRARIES})
     set_target_properties(chiaki PROPERTIES OUTPUT_NAME PS5Link)
 endif()
 

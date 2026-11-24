@@ -7,6 +7,10 @@
 #include <QEventLoop>
 #include <QLockFile>
 #include <discoverymanager.h>
+#include <ds5btidle.h>
+#ifdef _WIN32
+#include <ds5bt.h>
+#endif
 #include <QJsonArray>
 #include <QTimer>
 #include <QUrlQuery>
@@ -314,6 +318,54 @@ Settings::Settings(const QString &conf, QObject *parent, bool initialize) : QObj
 }
 
 #ifdef PS5LINK_BUILD
+int Settings::GetGamepadIdleDesktop() const
+{
+    const int minutes = settings.value("settings/gamepad_idle_desktop", 5).toInt();
+    return Ds5BtIdlePolicy::validMinutes(minutes) ? minutes : 5;
+}
+
+int Settings::GetGamepadIdleStream() const
+{
+    const int minutes = settings.value("settings/gamepad_idle_stream", 15).toInt();
+    return Ds5BtIdlePolicy::validMinutes(minutes) ? minutes : 15;
+}
+
+int Settings::RunLauncherIdleMonitor(const QString &profile, unsigned long parentPid)
+{
+#ifdef _WIN32
+    const HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
+    if(!parent)
+        return 1;
+    const HANDLE monitor = CreateMutexW(nullptr, FALSE, L"Local\\PS5Link.ControllerIdleMonitor");
+    const bool singleton = monitor && GetLastError() != ERROR_ALREADY_EXISTS;
+    Settings active(profile, nullptr, false);
+    if(singleton && active.GetGamepadIdleEnabled() && active.GetGamepadIdleDesktop())
+    {
+        auto &controller = Ds5BtManager::instance();
+        controller.setIdlePolicy({true, active.GetGamepadIdleDesktop(), active.GetGamepadIdleStream(),
+            active.GetGamepadIdleKeepCharging()});
+        controller.startPassiveIdleMonitor();
+        QEventLoop loop;
+        QTimer lifetime;
+        QObject::connect(&lifetime, &QTimer::timeout, &loop, [&] {
+            if(WaitForSingleObject(parent, 0) != WAIT_TIMEOUT)
+                loop.quit();
+        });
+        lifetime.start(500);
+        loop.exec();
+        controller.shutdown();
+    }
+    if(monitor)
+        CloseHandle(monitor);
+    CloseHandle(parent);
+    return 0;
+#else
+    Q_UNUSED(profile)
+    Q_UNUSED(parentPid)
+    return 1;
+#endif
+}
+
 int Settings::RunLauncherSettingsCommand(const QString &profile, bool write)
 {
     Settings active(profile, nullptr, false);
@@ -408,6 +460,10 @@ int Settings::RunLauncherSettingsCommand(const QString &profile, bool write)
     add("Gamma", &Settings::GetDx12Gamma, &Settings::SetDx12Gamma, 80, 125);
     add("GyroReset", &Settings::GetEnableGyroReset, &Settings::SetEnableGyroReset);
     add("GamepadQuit", &Settings::GetGamepadQuitHotkey, &Settings::SetGamepadQuitHotkey);
+    add("GamepadIdleEnabled", &Settings::GetGamepadIdleEnabled, &Settings::SetGamepadIdleEnabled);
+    add("GamepadIdleDesktop", &Settings::GetGamepadIdleDesktop, &Settings::SetGamepadIdleDesktop, 0, 60, {0, 1, 5, 10, 15, 30, 60});
+    add("GamepadIdleStream", &Settings::GetGamepadIdleStream, &Settings::SetGamepadIdleStream, 0, 60, {0, 1, 5, 10, 15, 30, 60});
+    add("GamepadIdleKeepCharging", &Settings::GetGamepadIdleKeepCharging, &Settings::SetGamepadIdleKeepCharging);
     add("Keyboard", &Settings::GetKeyboardEnabled, &Settings::SetKeyboardEnabled);
     add("MouseTouch", &Settings::GetMouseTouchEnabled, &Settings::SetMouseTouchEnabled);
     add("RumbleIntensity", &Settings::GetRumbleHapticsIntensity, &Settings::SetRumbleHapticsIntensity, 0, 5);
@@ -3123,6 +3179,8 @@ void Settings::ResetStreamSettings()
 		"settings/wifi_streaming_mode", "settings/prevent_display_sleep", "settings/performance_mode",
 		"settings/controller_polling_ms", "settings/gamepad_quit_hotkey",
 		"settings/video_reorder_window_ms", "settings/mute_pc_audio_with_dualsense_headphones",
+		"settings/gamepad_idle_enabled", "settings/gamepad_idle_desktop", "settings/gamepad_idle_stream",
+		"settings/gamepad_idle_keep_charging",
 		"settings/enable_rumble", "settings/enable_adaptive_triggers", "settings/enable_gyro_reset",
 		"settings/lightbar_mode", "settings/theme_mode", "settings/volume_controls_system",
 		"settings/hide_on_screen_controls", "settings/show_mic_button",

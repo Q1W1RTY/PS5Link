@@ -41,6 +41,9 @@ internal static class ClientRunner
 
     internal static bool IsAvailable(string folder) => File.Exists(Path.Combine(folder, "PS5Link.exe"));
 
+    internal static Process RunIdleMonitor(string folder) =>
+        Start(CreateStartInfo(folder, $"--launcher-controller-idle {Environment.ProcessId}"));
+
     internal static async Task<int> RunAsync(string folder)
     {
         using var process = Start(CreateStartInfo(folder,

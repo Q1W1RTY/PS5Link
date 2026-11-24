@@ -24,6 +24,8 @@ internal sealed partial class MainWindow : Window
     private JsonObject? legacyState;
     private ClientRunner.Preferences? savedPreferences;
     private ClientRunner.ProfileSettings? profileSnapshot;
+    private System.Diagnostics.Process? idleMonitor;
+    private (string Profile, int Minutes, bool KeepCharging)? idleMonitorPolicy;
     private ClientRunner.ConsoleEntry[] consoles = [];
     private string savedConsole = "";
     internal double ViewportHeight => double.IsFinite(Viewport.MaxHeight) ? Math.Max(370, Viewport.MaxHeight) : 760;
@@ -231,6 +233,59 @@ internal sealed partial class MainWindow : Window
         Refresh();
         savedPreferences = GetPreferences();
         loadedProfile = profile.Profile;
+        RefreshIdleMonitor();
+    }
+
+    private void RefreshIdleMonitor()
+    {
+        if (windowLifetime.IsCancellationRequested)
+            return;
+        var profile = profileSnapshot;
+        int minutes = profile?.Advanced["GamepadIdleEnabled"]?.GetValue<bool>() == true
+            ? profile.Advanced["GamepadIdleDesktop"]?.GetValue<int>() ?? 0 : 0;
+        if (minutes == 0)
+        {
+            StopIdleMonitor();
+            return;
+        }
+
+        var policy = (profile!.Profile, minutes, profile.Advanced["GamepadIdleKeepCharging"]?.GetValue<bool>() == true);
+        if (idleMonitor is { HasExited: false } && idleMonitorPolicy == policy)
+            return;
+        StopIdleMonitor();
+        try
+        {
+            idleMonitor = ClientRunner.RunIdleMonitor(AppContext.BaseDirectory);
+            idleMonitorPolicy = policy;
+        }
+        catch (Exception error) when (error is Win32Exception or InvalidOperationException)
+        {
+            System.Diagnostics.Trace.WriteLine(error.Message);
+        }
+    }
+
+    private void StopIdleMonitor()
+    {
+        if (idleMonitor is not { } process)
+            return;
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill();
+                process.WaitForExit(1500);
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // The monitor can exit between checking its state and stopping it.
+        }
+        finally
+        {
+            process.Dispose();
+            idleMonitor = null;
+            idleMonitorPolicy = null;
+        }
     }
 
     private string SelectedConsole => ConsolePicker.SelectedIndex is > 0 && ConsolePicker.SelectedIndex <= consoles.Length
@@ -386,6 +441,7 @@ internal sealed partial class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         windowLifetime.Cancel();
+        StopIdleMonitor();
         SaveState();
         base.OnClosed(e);
     }
@@ -567,6 +623,7 @@ internal sealed partial class MainWindow : Window
             if (savedPreferences is null)
                 await LoadClientSettingsAsync();
             await SaveClientSettingsAsync();
+            StopIdleMonitor();
             int exitCode = await ClientRunner.RunAsync(folder);
             if (!windowLifetime.IsCancellationRequested)
                 await LoadClientSettingsAsync();
@@ -584,6 +641,7 @@ internal sealed partial class MainWindow : Window
         finally
         {
             busy = false;
+            RefreshIdleMonitor();
             Refresh();
         }
     }
@@ -624,6 +682,7 @@ internal sealed partial class MainWindow : Window
             ShowUpdateFeedback($"Скачиваем версию {release.Version}…", $"Downloading version {release.Version}…");
             string installer = await ReleaseUpdate.DownloadAsync(release, deadline.Token);
             deadline.Token.ThrowIfCancellationRequested();
+            StopIdleMonitor();
             if (ReleaseUpdate.OtherInstanceIsRunning(directory))
             {
                 ShowUpdateFeedback("Закрой другие окна PS5Link и попробуй снова.",
@@ -647,7 +706,10 @@ internal sealed partial class MainWindow : Window
         {
             updating = false;
             if (!windowLifetime.IsCancellationRequested)
+            {
+                RefreshIdleMonitor();
                 Refresh();
+            }
         }
     }
 

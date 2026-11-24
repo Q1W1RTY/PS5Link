@@ -86,6 +86,7 @@ constexpr auto launcherPsnUrl = "--launcher-psn-url";
 constexpr auto launcherPsnLogin = "--launcher-psn-login";
 constexpr auto launcherRegister = "--launcher-register-console";
 constexpr auto launcherDiscover = "--launcher-discover-consoles";
+constexpr auto launcherIdle = "--launcher-controller-idle";
 
 bool hasLauncherSettingsCommand(int argc, char *const *argv)
 {
@@ -98,7 +99,7 @@ bool hasLauncherSettingsCommand(int argc, char *const *argv)
             || isCommand(argv[i], importLauncherProfile) || isCommand(argv[i], exportLauncherProfile)
             || isCommand(argv[i], switchLauncherProfile) || isCommand(argv[i], launcherPsnUrl)
             || isCommand(argv[i], launcherPsnLogin) || isCommand(argv[i], launcherRegister)
-            || isCommand(argv[i], launcherDiscover))
+            || isCommand(argv[i], launcherDiscover) || isCommand(argv[i], launcherIdle))
             return true;
     return false;
 }
@@ -117,11 +118,14 @@ int runLauncherSettingsCommand(int &argc, char **argv)
     const QCommandLineOption psnLogin(launcherPsnLogin + 2, "Finish PSN sign-in using a redirect from standard input.");
     const QCommandLineOption registerConsole(launcherRegister + 2, "Register a console using data from standard input.");
     const QCommandLineOption discoverConsoles(launcherDiscover + 2, "Discover consoles on the local network.");
-    parser.addOptions({read, write, importProfile, exportProfile, switchProfile, profileOption, psnUrl, psnLogin, registerConsole, discoverConsoles});
+    const QCommandLineOption idleMonitor(launcherIdle + 2, "Watch Bluetooth controller input for an idle launcher.", "launcher-pid");
+    parser.addOptions({read, write, importProfile, exportProfile, switchProfile, profileOption,
+        psnUrl, psnLogin, registerConsole, discoverConsoles, idleMonitor});
     if(!parser.parse(app.arguments()) || !parser.positionalArguments().isEmpty()
         || int(parser.isSet(read)) + int(parser.isSet(write)) + int(parser.isSet(importProfile))
             + int(parser.isSet(exportProfile)) + int(parser.isSet(switchProfile)) + int(parser.isSet(psnUrl))
-            + int(parser.isSet(psnLogin)) + int(parser.isSet(registerConsole)) + int(parser.isSet(discoverConsoles)) != 1)
+            + int(parser.isSet(psnLogin)) + int(parser.isSet(registerConsole)) + int(parser.isSet(discoverConsoles))
+            + int(parser.isSet(idleMonitor)) != 1)
         return 2;
     if(parser.isSet(profileOption) && !(parser.isSet(read) || parser.isSet(write)))
         return 2;
@@ -144,6 +148,12 @@ int runLauncherSettingsCommand(int &argc, char **argv)
         return Settings::RunLauncherSetupCommand(profile, "register");
     if(parser.isSet(discoverConsoles))
         return Settings::RunLauncherSetupCommand(profile, "discover");
+    if(parser.isSet(idleMonitor))
+    {
+        bool valid = false;
+        const auto pid = parser.value(idleMonitor).toULong(&valid);
+        return valid && pid ? Settings::RunLauncherIdleMonitor(profile, pid) : 2;
+    }
     return Settings::RunLauncherSettingsCommand(profile, parser.isSet(write));
 }
 }
