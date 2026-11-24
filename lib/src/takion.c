@@ -250,6 +250,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 	takion->key_pos_local = 0;
 	takion->gkcrypt_remote = NULL;
 	takion->cb = info->cb;
+	takion->poll_timeout = info->poll_timeout;
 	takion->cb_user = info->cb_user;
 	takion->a_rwnd = TAKION_A_RWND;
 
@@ -1202,6 +1203,8 @@ static void *takion_thread_func(void *user)
 		if(!buf)
 			break;
 		uint64_t recv_timeout_ms = takion_av_queues_next_timeout_ms(takion);
+		if(takion->poll_timeout)
+			recv_timeout_ms = takion->poll_timeout(takion->cb_user, recv_timeout_ms);
 		if(recv_timeout_ms == 0)
 		{
 			free(buf);

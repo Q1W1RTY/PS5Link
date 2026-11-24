@@ -28,7 +28,16 @@ class PSNAccountID : public QObject {
     Q_OBJECT
 
 public:
-    PSNAccountID(Settings *settings, QObject *parent = nullptr);
+    PSNAccountID(Settings *settings, QObject *parent = nullptr, bool saveSettings = true);
+
+    struct Credentials
+    {
+        QString accessToken;
+        QString refreshToken;
+        QString expiry;
+        QString accountId;
+    };
+    const Credentials &GetCredentials() const { return credentials; }
 
 
     void GetPsnAccountId(QString redirectCode);
@@ -42,29 +51,8 @@ signals:
 private:
     QString basicAuthHeader;
     Settings *settings = {};
-
-    static QByteArray to_bytes_little_endian(long long number, int num_bytes) {
-        QByteArray byte_array;
-        int n = 1;
-        if(*(char *)&n == 1) // little endian
-        {
-            for (int i = 0; i < num_bytes; i++)
-            {
-                char result = number & 0xFF;
-                byte_array.append(result);
-                number >>= 8;
-            }
-        }
-        else // big endian
-        {
-            for (int i = num_bytes - 1; i >= 0; i--)
-            {
-                char result = (number >> (8 * num_bytes)) & 0xFF;
-                byte_array.append(result);
-            }    
-        }
-        return byte_array;
-    }
+    bool saveSettings;
+    Credentials credentials;
 
 private slots:
     void handleAccessTokenResponse(const QString& url, const QJsonDocument& jsonDocument);

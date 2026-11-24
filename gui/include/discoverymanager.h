@@ -60,7 +60,7 @@ class DiscoveryManager : public QObject
 		void UpdateManualServices();
 
 	public:
-		explicit DiscoveryManager(QObject *parent = nullptr);
+		explicit DiscoveryManager(QObject *parent = nullptr, bool logEnabled = true);
 		~DiscoveryManager();
 
 		void SetActive(bool active);

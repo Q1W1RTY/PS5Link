@@ -90,6 +90,7 @@ typedef struct chiaki_connect_info_t
 	double packet_loss_max;
 	bool enable_idr_on_fec_failure;
 	bool always_request_idr_on_loss;
+	bool bypass_video_packet_reorder;
 	uint8_t video_reorder_window_ms;
 } ChiakiConnectInfo;
 
@@ -230,6 +231,7 @@ typedef struct chiaki_session_t
 		uint8_t psn_account_id[CHIAKI_PSN_ACCOUNT_ID_SIZE];
 		bool enable_idr_on_fec_failure;
 	bool always_request_idr_on_loss;
+	bool bypass_video_packet_reorder;
 	uint8_t video_reorder_window_ms;
 	} connect_info;
 

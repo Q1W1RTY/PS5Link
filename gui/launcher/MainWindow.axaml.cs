@@ -5,6 +5,7 @@ using Avalonia.Interactivity;
 using Avalonia.Media;
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace PS5Link.Launcher;
 
@@ -20,23 +21,14 @@ internal sealed partial class MainWindow : Window
     private static readonly string OpacityFile = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PS5Link", "launcher-opacity.txt");
 
-    private sealed record LauncherState(
-        bool Dx12 = true,
-        int Timing = 0,
-        int Generator = 0,
-        int Upscale = RtxVsrMedium,
-        int Target = 0,
-        int Buffer = 1,
-        bool Recover = true,
-        bool AdaptiveTriggers = true,
-        bool Haptics = true,
-        bool BtSpeaker = false,
-        bool MicUnmuted = false,
-        int Lightbar = 0,
-        int Polling = 2,
-        int Opacity = 94,
-        bool GradientTheme = false);
-
+    private JsonObject? legacyState;
+    private ClientRunner.Preferences? savedPreferences;
+    private ClientRunner.ProfileSettings? profileSnapshot;
+    private ClientRunner.ConsoleEntry[] consoles = [];
+    private string savedConsole = "";
+    internal double ViewportHeight => double.IsFinite(Viewport.MaxHeight) ? Math.Max(370, Viewport.MaxHeight) : 760;
+    private string loadedProfile = "";
+    private bool closeAfterSaving;
     private bool busy;
     private bool updating;
     private readonly CancellationTokenSource windowLifetime = new();
@@ -64,18 +56,36 @@ internal sealed partial class MainWindow : Window
             ApplyOpacity();
             SaveState();
         };
-        foreach (var toggle in new[] { Dx12, Recover, AdaptiveTriggers, Haptics, BtSpeaker, MicUnmuted })
+        foreach (var toggle in new[] { Dx12, Recover, AdaptiveTriggers, Haptics, BtSpeaker, MutePcAudio, MicUnmuted })
             toggle.IsCheckedChanged += (_, _) => OnSettingChanged();
         foreach (var input in new[] { Timing, Upscale, Generator, Target, Buffer, Lightbar, Polling })
             input.SelectionChanged += (_, _) => OnSettingChanged();
         Refresh();
     }
 
-    protected override void OnOpened(EventArgs e)
+    protected override async void OnOpened(EventArgs e)
     {
         base.OnOpened(e);
         if (Screens.ScreenFromWindow(this) is { } screen)
             Viewport.MaxHeight = Math.Max(120, screen.WorkingArea.Height / screen.Scaling - 50);
+        if (!ClientRunner.IsAvailable(AppContext.BaseDirectory))
+            return;
+
+        busy = true;
+        Refresh();
+        try
+        {
+            await LoadClientSettingsAsync();
+        }
+        catch (Exception error) when (IsSettingsError(error))
+        {
+            ReportSettingsError(error);
+        }
+        finally
+        {
+            busy = false;
+            Refresh();
+        }
     }
 
     private void OnSettingChanged()
@@ -83,7 +93,6 @@ internal sealed partial class MainWindow : Window
         if (syncing)
             return;
         Refresh();
-        SaveState();
     }
 
     private void LoadState()
@@ -91,34 +100,29 @@ internal sealed partial class MainWindow : Window
         syncing = true;
         try
         {
-            int fallbackOpacity = LoadLegacyOpacity();
-            LauncherState state = new(Opacity: fallbackOpacity);
+            int opacity = LoadLegacyOpacity();
+            bool gradient = false;
             if (File.Exists(StateFile))
             {
                 try
                 {
-                    if (JsonSerializer.Deserialize<LauncherState>(File.ReadAllText(StateFile)) is { } loaded)
-                        state = loaded;
+                    var state = JsonNode.Parse(File.ReadAllText(StateFile))?.AsObject();
+                    if (state is not null)
+                    {
+                        opacity = state["Opacity"]?.GetValue<int>() ?? opacity;
+                        gradient = state["GradientTheme"]?.GetValue<bool>() ?? false;
+                        legacyState = state;
+                    }
                 }
-                catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException) { }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or FormatException) { }
             }
-
-            Dx12.IsChecked = state.Dx12;
-            Timing.SelectedIndex = Math.Clamp(state.Timing, 0, 2);
-            Generator.SelectedIndex = Math.Clamp(state.Generator, 0, 3);
-            Upscale.SelectedIndex = Math.Clamp(state.Upscale, 0, 7);
-            Target.SelectedIndex = Math.Clamp(state.Target, 0, 3);
-            Buffer.SelectedIndex = Math.Clamp(state.Buffer, 0, 2);
-            Recover.IsChecked = state.Recover;
-            AdaptiveTriggers.IsChecked = state.AdaptiveTriggers;
-            Haptics.IsChecked = state.Haptics;
-            BtSpeaker.IsChecked = state.BtSpeaker;
-            MicUnmuted.IsChecked = state.MicUnmuted;
-            Lightbar.SelectedIndex = Math.Clamp(state.Lightbar, 0, 3);
-            Polling.SelectedIndex = Math.Clamp(state.Polling, 0, 3);
-            WindowOpacity.Value = Math.Clamp(state.Opacity, 75, 100);
-            GradientTheme.IsChecked = state.GradientTheme;
-            ApplyGradientBrush(state.GradientTheme);
+            else
+            {
+                legacyState = JsonSerializer.SerializeToNode(GetPreferences())!.AsObject();
+            }
+            WindowOpacity.Value = Math.Clamp(opacity, 75, 100);
+            GradientTheme.IsChecked = gradient;
+            ApplyGradientBrush(gradient);
         }
         finally
         {
@@ -132,24 +136,11 @@ internal sealed partial class MainWindow : Window
         {
             Directory.CreateDirectory(Path.GetDirectoryName(StateFile)!);
             int opacity = Math.Clamp((int)WindowOpacity.Value, 75, 100);
-            var state = new LauncherState(
-                Dx12: Dx12.IsChecked == true,
-                Timing: Math.Clamp(Timing.SelectedIndex, 0, 2),
-                Generator: Math.Clamp(Generator.SelectedIndex, 0, 3),
-                Upscale: Math.Clamp(Upscale.SelectedIndex, 0, 7),
-                Target: Math.Clamp(Target.SelectedIndex, 0, 3),
-                Buffer: Math.Clamp(Buffer.SelectedIndex, 0, 2),
-                Recover: Recover.IsChecked == true,
-                AdaptiveTriggers: AdaptiveTriggers.IsChecked == true,
-                Haptics: Haptics.IsChecked == true,
-                BtSpeaker: BtSpeaker.IsChecked == true,
-                MicUnmuted: MicUnmuted.IsChecked == true,
-                Lightbar: Math.Clamp(Lightbar.SelectedIndex, 0, 3),
-                Polling: Math.Clamp(Polling.SelectedIndex, 0, 3),
-                Opacity: opacity,
-                GradientTheme: GradientTheme.IsChecked == true);
+            var state = legacyState ?? new JsonObject();
+            state["Opacity"] = opacity;
+            state["GradientTheme"] = GradientTheme.IsChecked == true;
             string pending = StateFile + $".{Environment.ProcessId}.tmp";
-            File.WriteAllText(pending, JsonSerializer.Serialize(state));
+            File.WriteAllText(pending, state.ToJsonString());
             File.Move(pending, StateFile, overwrite: true);
             File.WriteAllText(OpacityFile, opacity.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
@@ -157,6 +148,144 @@ internal sealed partial class MainWindow : Window
         {
             System.Diagnostics.Trace.WriteLine($"Could not save launcher state: {error.Message}");
         }
+    }
+
+    private ClientRunner.Preferences GetPreferences() => new(
+        Dx12.IsChecked == true,
+        Timing.SelectedIndex,
+        Generator.SelectedIndex,
+        Upscale.SelectedIndex,
+        Target.SelectedIndex,
+        Buffer.SelectedIndex,
+        Recover.IsChecked == true,
+        AdaptiveTriggers.IsChecked == true,
+        Haptics.IsChecked == true,
+        BtSpeaker.IsChecked == true,
+        MutePcAudio.IsChecked == true,
+        MicUnmuted.IsChecked == true,
+        Lightbar.SelectedIndex,
+        Polling.SelectedIndex);
+
+    private async Task LoadClientSettingsAsync()
+    {
+        string folder = AppContext.BaseDirectory;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(windowLifetime.Token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        var profile = await ClientRunner.ReadSettingsAsync(folder, deadline.Token);
+        if (legacyState is { } legacy)
+        {
+            var current = JsonSerializer.SerializeToNode(profile.Values)!.AsObject();
+            var migration = new JsonObject();
+            foreach (string key in profile.Missing)
+            {
+                if (legacy[key] is JsonValue old && current[key] is JsonValue value
+                    && (value.TryGetValue<bool>(out _) ? old.TryGetValue<bool>(out _) : old.TryGetValue<int>(out _)))
+                {
+                    int maximum = key switch
+                    {
+                        "Upscale" => 7,
+                        "Generator" or "Target" or "Lightbar" or "Polling" => 3,
+                        _ => 2
+                    };
+                    migration[key] = old.TryGetValue<int>(out int number) ? JsonValue.Create(Math.Clamp(number, 0, maximum)) : old.DeepClone();
+                }
+            }
+            if (migration.Count > 0)
+            {
+                await ClientRunner.WriteSettingsAsync(folder, profile.Profile, migration, deadline.Token);
+                profile = await ClientRunner.ReadSettingsAsync(folder, deadline.Token);
+            }
+            legacyState = null;
+            SaveState();
+        }
+
+        var prefs = profile.Values;
+        profileSnapshot = profile;
+        consoles = profile.Consoles;
+        savedConsole = consoles.Any(console => console.Id == profile.PreferredConsole) ? profile.PreferredConsole : "";
+        syncing = true;
+        try
+        {
+            generatorBeforeDlss = null;
+            targetBeforeBasicScaler = null;
+            RefreshConsolePicker(savedConsole);
+            Dx12.IsChecked = prefs.Dx12;
+            Timing.SelectedIndex = prefs.Timing;
+            Generator.SelectedIndex = prefs.Generator;
+            Upscale.SelectedIndex = prefs.Upscale;
+            Target.SelectedIndex = prefs.Target;
+            Buffer.SelectedIndex = prefs.Buffer;
+            Recover.IsChecked = prefs.Recover;
+            AdaptiveTriggers.IsChecked = prefs.AdaptiveTriggers;
+            Haptics.IsChecked = prefs.Haptics;
+            BtSpeaker.IsChecked = prefs.BtSpeaker;
+            MutePcAudio.IsChecked = prefs.MutePcAudio;
+            MicUnmuted.IsChecked = prefs.MicUnmuted;
+            Lightbar.SelectedIndex = prefs.Lightbar;
+            Polling.SelectedIndex = prefs.Polling;
+        }
+        finally
+        {
+            syncing = false;
+        }
+        Refresh();
+        savedPreferences = GetPreferences();
+        loadedProfile = profile.Profile;
+    }
+
+    private string SelectedConsole => ConsolePicker.SelectedIndex is > 0 && ConsolePicker.SelectedIndex <= consoles.Length
+        ? consoles[ConsolePicker.SelectedIndex - 1].Id : "";
+
+    private void RefreshConsolePicker(string selection)
+    {
+        var labels = consoles.Select(console =>
+        {
+            string kind = console.Ps5 ? "PS5" : "PS4";
+            string caption = string.IsNullOrWhiteSpace(console.Name) ? kind : $"{console.Name} ({kind})";
+            return consoles.Count(other => other.Name == console.Name && other.Ps5 == console.Ps5) > 1
+                ? $"{caption} · {console.Id[^4..]}" : caption;
+        });
+        string prompt = consoles.Length > 1 ? Localize("Выбрать консоль…", "Select a console…")
+            : Localize("Автовыбор", "Automatic");
+        ConsolePicker.ItemsSource = labels.Prepend(prompt).ToArray();
+        ConsolePicker.SelectedIndex = Array.FindIndex(consoles, console => console.Id == selection) + 1;
+        ConsoleRow.IsVisible = consoles.Length > 0;
+    }
+
+    private async Task SaveClientSettingsAsync()
+    {
+        var preferences = GetPreferences();
+        string selectedConsole = SelectedConsole;
+        if (savedPreferences is null || (preferences == savedPreferences && selectedConsole == savedConsole))
+            return;
+
+        var previous = JsonSerializer.SerializeToNode(savedPreferences)!.AsObject();
+        var current = JsonSerializer.SerializeToNode(preferences)!.AsObject();
+        var patch = new JsonObject();
+        foreach (var field in current)
+            if (!JsonNode.DeepEquals(previous[field.Key], field.Value))
+                patch[field.Key] = field.Value?.DeepClone();
+
+        if (preferences.Dx12 != savedPreferences.Dx12)
+            patch["Upscale"] = preferences.Upscale;
+
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(windowLifetime.Token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        await ClientRunner.WriteSettingsAsync(AppContext.BaseDirectory, loadedProfile, patch, deadline.Token,
+            preferredConsole: selectedConsole == savedConsole ? null : selectedConsole);
+        savedPreferences = preferences;
+        savedConsole = selectedConsole;
+    }
+
+    private static bool IsSettingsError(Exception error) =>
+        error is Win32Exception or InvalidOperationException or IOException or JsonException or OperationCanceledException;
+
+    private void ReportSettingsError(Exception error)
+    {
+        if (windowLifetime.IsCancellationRequested)
+            return;
+        System.Diagnostics.Trace.WriteLine(error.Message);
+        SetStatus("Не удалось синхронизировать настройки PS5Link", "Could not sync PS5Link settings", 0xFF453A);
     }
 
     private static int LoadLegacyOpacity()
@@ -204,6 +333,8 @@ internal sealed partial class MainWindow : Window
         ToolTip.SetTip(StatusText, StatusText.Text);
         if (UpdateFeedback.IsVisible)
             UpdateFeedback.Text = Localize(updateFeedback.Russian, updateFeedback.English);
+        if (profileSnapshot is not null)
+            RefreshConsolePicker(SelectedConsole);
     }
 
     private void ToggleLanguage(object? sender, RoutedEventArgs e)
@@ -218,6 +349,37 @@ internal sealed partial class MainWindow : Window
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
             SetStatus("Не удалось сохранить язык", "Could not save language", 0xFF453A);
+        }
+    }
+
+    protected override async void OnClosing(WindowClosingEventArgs e)
+    {
+        base.OnClosing(e);
+        if (e.Cancel || closeAfterSaving || savedPreferences is null
+            || (savedPreferences == GetPreferences() && savedConsole == SelectedConsole))
+            return;
+
+        e.Cancel = true;
+        if (busy)
+            return;
+
+        busy = true;
+        Refresh();
+        try
+        {
+            await SaveClientSettingsAsync();
+            closeAfterSaving = true;
+            Close();
+        }
+        catch (Exception error) when (IsSettingsError(error))
+        {
+            ReportSettingsError(error);
+        }
+        finally
+        {
+            busy = false;
+            if (!closeAfterSaving)
+                Refresh();
         }
     }
 
@@ -272,14 +434,15 @@ internal sealed partial class MainWindow : Window
                 Target.SelectedIndex = 0;
 
             Start.IsEnabled = Advanced.IsEnabled = UpdateButton.IsEnabled = !busy && !updating;
-            Dx12.IsEnabled = Upscale.IsEnabled = !busy;
-            RtxPreset.IsEnabled = StandardPreset.IsEnabled = !busy;
-            Timing.IsEnabled = !busy && dx12;
-            Generator.IsEnabled = !busy && dx12 && !useDlss;
-            Target.IsEnabled = !busy && canSelectTarget;
-            Buffer.IsEnabled = Recover.IsEnabled = !busy;
-            AdaptiveTriggers.IsEnabled = Haptics.IsEnabled = BtSpeaker.IsEnabled = MicUnmuted.IsEnabled = !busy;
-            Lightbar.IsEnabled = Polling.IsEnabled = !busy;
+            bool editable = !busy && savedPreferences is not null;
+            Dx12.IsEnabled = Upscale.IsEnabled = ConsolePicker.IsEnabled = editable;
+            RtxPreset.IsEnabled = StandardPreset.IsEnabled = editable;
+            Timing.IsEnabled = editable && dx12;
+            Generator.IsEnabled = editable && dx12 && !useDlss;
+            Target.IsEnabled = editable && canSelectTarget;
+            Buffer.IsEnabled = Recover.IsEnabled = editable;
+            AdaptiveTriggers.IsEnabled = Haptics.IsEnabled = BtSpeaker.IsEnabled = MutePcAudio.IsEnabled = MicUnmuted.IsEnabled = editable;
+            Lightbar.IsEnabled = Polling.IsEnabled = editable;
 
             RendererText.Text = dx12 ? "Direct3D 12" : "Vulkan";
             string scaling = Upscale.SelectedIndex <= 0 ? Localize("Шейдер", "Shader") : ScalingNames[Upscale.SelectedIndex];
@@ -331,35 +494,65 @@ internal sealed partial class MainWindow : Window
             syncing = false;
         }
         Refresh();
-        SaveState();
     }
 
-    private async void StartClient(object? sender, RoutedEventArgs e) => await RunClientAsync(false);
+    private async void StartClient(object? sender, RoutedEventArgs e)
+    {
+        if (profileSnapshot is not null && consoles.Length == 0)
+        {
+            await OpenAdvancedAsync(consoleSetup: true);
+            return;
+        }
+        if (consoles.Length > 1 && SelectedConsole.Length == 0)
+        {
+            SetStatus("Выбери консоль для подключения", "Select a console to connect", 0xFF9F0A);
+            ConsolePicker.Focus();
+            return;
+        }
+        await RunClientAsync();
+    }
 
-    private async void OpenAdvanced(object? sender, RoutedEventArgs e) => await RunClientAsync(true);
+    private async void OpenAdvanced(object? sender, RoutedEventArgs e) => await OpenAdvancedAsync(consoleSetup: false);
 
-    private async Task RunClientAsync(bool advancedSettings)
+    private async Task OpenAdvancedAsync(bool consoleSetup)
+    {
+        if (busy || updating)
+            return;
+        if (!ClientRunner.IsAvailable(AppContext.BaseDirectory))
+        {
+            SetStatus("Запусти из папки PS5Link-Win", "Run from the PS5Link-Win folder", 0xFF453A);
+            return;
+        }
+
+        busy = true;
+        Refresh();
+        try
+        {
+            if (profileSnapshot is null)
+                await LoadClientSettingsAsync();
+            await SaveClientSettingsAsync();
+            await new AdvancedWindow(this, profileSnapshot!, russian, consoleSetup).ShowDialog(this);
+            await LoadClientSettingsAsync();
+        }
+        catch (Exception error) when (IsSettingsError(error))
+        {
+            ReportSettingsError(error);
+        }
+        finally
+        {
+            busy = false;
+            Refresh();
+        }
+
+    }
+
+    private async Task RunClientAsync()
     {
         if (busy || updating)
             return;
 
         SaveState();
         var folder = AppContext.BaseDirectory;
-        var request = new ClientRunner.Request(
-            Dx12: Dx12.IsChecked == true,
-            Timing: Timing.SelectedIndex,
-            Generator: Generator.SelectedIndex,
-            Upscale: Upscale.SelectedIndex,
-            Target: Target.SelectedIndex,
-            Buffer: Buffer.SelectedIndex,
-            Recover: Recover.IsChecked == true,
-            AdaptiveTriggers: AdaptiveTriggers.IsChecked == true,
-            Haptics: Haptics.IsChecked == true,
-            BtSpeaker: BtSpeaker.IsChecked == true,
-            MicUnmuted: MicUnmuted.IsChecked == true,
-            LightbarIndex: Lightbar.SelectedIndex,
-            PollingIndex: Polling.SelectedIndex,
-            AdvancedSettings: advancedSettings);
         if (!ClientRunner.IsAvailable(folder))
         {
             SetStatus("Запусти из папки PS5Link-Win", "Run from the PS5Link-Win folder", 0xFF453A);
@@ -367,23 +560,26 @@ internal sealed partial class MainWindow : Window
         }
 
         busy = true;
-        SetStatus("Клиент открыт", "Client open", 0xFF9F0A);
+        SetStatus("Подключение к консоли", "Connecting to console", 0xFF9F0A);
         Refresh();
         try
         {
-            int exitCode = await ClientRunner.RunAsync(folder, request);
+            if (savedPreferences is null)
+                await LoadClientSettingsAsync();
+            await SaveClientSettingsAsync();
+            int exitCode = await ClientRunner.RunAsync(folder);
+            if (!windowLifetime.IsCancellationRequested)
+                await LoadClientSettingsAsync();
             if (exitCode == 0)
-                SetStatus("Клиент закрыт", "Client closed", 0x30D158);
+                SetStatus("Стрим завершён", "Stream ended", 0x30D158);
+            else if (exitCode == 7)
+                SetStatus("Консоль не найдена. Проверь сеть или вход в PSN.", "Console unavailable. Check the network or PSN sign-in.", 0xFF453A);
             else
                 SetStatus($"Ошибка запуска ({exitCode})", $"Launch error ({exitCode})", 0xFF453A);
         }
-        catch (Win32Exception)
+        catch (Exception error) when (IsSettingsError(error))
         {
-            SetStatus("Не удалось запустить PS5Link", "Could not start PS5Link", 0xFF453A);
-        }
-        catch (InvalidOperationException)
-        {
-            SetStatus("Не удалось запустить PS5Link", "Could not start PS5Link", 0xFF453A);
+            ReportSettingsError(error);
         }
         finally
         {

@@ -46,6 +46,7 @@ typedef enum chiaki_bitstream_slice_type_t
 typedef struct chiaki_bitstream_slice_t
 {
 	ChiakiBitstreamSliceType slice_type;
+	bool is_idr;
 	unsigned reference_frame;
 } ChiakiBitstreamSlice;
 

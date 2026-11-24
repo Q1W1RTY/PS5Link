@@ -45,6 +45,12 @@ typedef enum {
 void chiaki_session_send_event(ChiakiSession *session, ChiakiEvent *event);
 
 static void stream_connection_takion_cb(ChiakiTakionEvent *event, void *user);
+
+static uint64_t stream_connection_poll_timeout(void *user, uint64_t timeout_ms)
+{
+	ChiakiStreamConnection *connection = user;
+	return chiaki_video_receiver_poll_timeout(connection->video_receiver, timeout_ms);
+}
 static void stream_connection_takion_data(ChiakiStreamConnection *stream_connection, ChiakiTakionMessageDataType data_type, uint8_t *buf, size_t buf_size);
 static void stream_connection_takion_data_protobuf(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size);
 static void stream_connection_takion_data_rumble(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size);
@@ -152,7 +158,10 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_run(ChiakiStreamConnectio
 	takion_info.log = stream_connection->log;
 	takion_info.disable_audio_video = stream_connection->session->connect_info.disable_audio_video;
 	takion_info.close_socket = true;
-	takion_info.bypass_video_reorder_queue = session->connect_info.video_reorder_window_ms > 0;
+	takion_info.bypass_video_reorder_queue = session->connect_info.bypass_video_packet_reorder
+		|| session->connect_info.video_reorder_window_ms > 0;
+	if(session->connect_info.video_reorder_window_ms > 0)
+		takion_info.poll_timeout = stream_connection_poll_timeout;
 	if(!socket)
 	{
 		takion_info.sa_len = session->connect_info.host_addrinfo_selected->ai_addrlen;

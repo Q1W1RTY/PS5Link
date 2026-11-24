@@ -3022,6 +3022,7 @@ void QmlMainWindow::show()
     props[QStringLiteral("parent")] = QVariant::fromValue(quick_window->contentItem());
 #ifdef PS5LINK_BUILD
     props[QStringLiteral("quickLaunch")] = qGuiApp->property("ps5linkQuickConnect").toBool();
+    props[QStringLiteral("returnToLauncher")] = qGuiApp->property("ps5linkLauncherSession").toBool();
 #endif
     quick_item = qobject_cast<QQuickItem*>(component.createWithInitialProperties(props));
     if (!quick_item) {

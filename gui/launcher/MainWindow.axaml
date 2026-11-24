@@ -129,6 +129,10 @@
         </Border>
 
         <StackPanel Spacing="6">
+          <Grid x:Name="ConsoleRow" IsVisible="False" ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="6,1">
+            <TextBlock Text="{DynamicResource LangConsole}" VerticalAlignment="Center" />
+            <ComboBox x:Name="ConsolePicker" Grid.Column="1" AutomationProperties.Name="{DynamicResource LangConsole}" />
+          </Grid>
           <Button x:Name="Start" Classes="primary" Content="{DynamicResource LangConnect}" Width="252" Height="40" CornerRadius="20"
                   FontSize="14" HorizontalAlignment="Center" Click="StartClient" />
           <Grid ColumnDefinitions="*,*" ColumnSpacing="6">
@@ -215,7 +219,7 @@
         <Expander Classes="category" Header="{DynamicResource LangGamepadHeader}"
                   AutomationProperties.Name="{DynamicResource LangGamepadHeader}">
           <StackPanel Margin="10,6" Spacing="5">
-            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto"
+            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto"
                   ColumnSpacing="12" RowSpacing="4">
               <TextBlock Text="{DynamicResource LangAdaptiveTriggers}" Classes="settingHelp" TextWrapping="Wrap"
                          ToolTip.Tip="{DynamicResource LangAdaptiveTriggersHelp}" VerticalAlignment="Center" />
@@ -244,6 +248,13 @@
                             AutomationProperties.Name="{DynamicResource LangMicUnmuted}"
                             Classes="settingHelp" ToolTip.Tip="{DynamicResource LangMicUnmutedHelp}"
                             AutomationProperties.HelpText="{DynamicResource LangMicUnmutedHelp}" />
+
+              <TextBlock Grid.Row="4" Text="{DynamicResource LangMutePcAudio}" Classes="settingHelp" TextWrapping="Wrap"
+                         ToolTip.Tip="{DynamicResource LangMutePcAudioHelp}" VerticalAlignment="Center" />
+              <ToggleSwitch x:Name="MutePcAudio" Grid.Row="4" Grid.Column="1" IsChecked="True" HorizontalAlignment="Right"
+                            AutomationProperties.Name="{DynamicResource LangMutePcAudio}"
+                            Classes="settingHelp" ToolTip.Tip="{DynamicResource LangMutePcAudioHelp}"
+                            AutomationProperties.HelpText="{DynamicResource LangMutePcAudioHelp}" />
             </Grid>
 
             <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto"

@@ -10,6 +10,7 @@
 static unsigned corrupt_messages;
 static unsigned idr_requests;
 static bool reject_frame;
+static bool reject_idr_request;
 static uint64_t clock_ms;
 
 uint64_t __wrap_chiaki_time_now_monotonic_us(void)
@@ -31,7 +32,7 @@ ChiakiErrorCode __wrap_stream_connection_send_idr_request(ChiakiStreamConnection
 {
     (void)connection;
     ++idr_requests;
-    return CHIAKI_ERR_SUCCESS;
+    return reject_idr_request ? CHIAKI_ERR_NETWORK : CHIAKI_ERR_SUCCESS;
 }
 
 static const uint8_t header[] = {
@@ -85,11 +86,24 @@ static void send_unit(ChiakiVideoReceiver *receiver, uint16_t frame, uint16_t in
     send_unit_data(receiver, frame, index, idr);
 }
 
+static void send_large_unit(ChiakiVideoReceiver *receiver, uint16_t frame, uint16_t index)
+{
+    enum { LARGE_UNITS = 11, UNIT_SIZE = sizeof(idr) / LARGE_UNITS };
+    uint8_t data[2 + UNIT_SIZE] = {0};
+    memcpy(data + 2, idr + index * UNIT_SIZE, UNIT_SIZE);
+    ChiakiTakionAVPacket packet = {
+        .is_video = true, .unit_index = index, .frame_index = frame,
+        .units_in_frame_total = LARGE_UNITS, .data = data, .data_size = sizeof(data),
+    };
+    chiaki_video_receiver_av_packet(receiver, &packet);
+}
+
 static void initialize_receiver(ChiakiVideoReceiver *receiver, ChiakiSession *session,
     ChiakiLog *log, unsigned *frames, uint8_t wait_ms)
 {
     corrupt_messages = 0;
     idr_requests = 0;
+    reject_idr_request = false;
     reject_frame = false;
     clock_ms = 2000;
     chiaki_log_init(log, 0, NULL, NULL);
@@ -571,6 +585,221 @@ static MunitResult test_reordered_profile_switch_emits_header_in_frame_order(con
     return MUNIT_OK;
 }
 
+static MunitResult test_idr_after_recovery_and_send_failure(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+    ChiakiSession session = {0};
+    ChiakiVideoReceiver receiver;
+    ChiakiLog log;
+    unsigned frames = 0;
+    initialize_receiver(&receiver, &session, &log, &frames, 0);
+
+    send_unit(&receiver, 1, 0);
+    send_unit(&receiver, 1, 2);
+    munit_assert_uint(idr_requests, ==, 1);
+    send_frame(&receiver, 2, idr);
+    munit_assert_false(chiaki_video_receiver_get_waiting_for_idr(&receiver));
+
+    clock_ms += 17;
+    reject_idr_request = true;
+    send_unit(&receiver, 3, 0);
+    send_unit(&receiver, 3, 2);
+    munit_assert_uint(idr_requests, ==, 2);
+    munit_assert_true(chiaki_video_receiver_get_waiting_for_idr(&receiver));
+
+    clock_ms += 17;
+    reject_idr_request = false;
+    send_unit(&receiver, 4, 0);
+    send_unit(&receiver, 4, 2);
+    munit_assert_uint(idr_requests, ==, 3);
+    munit_assert_uint64(chiaki_video_receiver_get_recovery_stats(&receiver).idr_requests, ==, 2);
+    chiaki_video_receiver_fini(&receiver);
+    return MUNIT_OK;
+}
+
+static MunitResult test_idle_deadline_flushes_and_promotes(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+    ChiakiSession session = {0};
+    ChiakiVideoReceiver receiver;
+    ChiakiLog log;
+    unsigned frames = 0;
+    initialize_receiver(&receiver, &session, &log, &frames, 8);
+
+    send_unit(&receiver, 1, 0); // The last unit never arrives.
+    munit_assert_uint64(chiaki_video_receiver_poll_timeout(&receiver, 100), ==, 8);
+    clock_ms += 2;
+    send_frame(&receiver, 2, idr);
+    munit_assert_uint(frames, ==, 0);
+    munit_assert_uint64(chiaki_video_receiver_poll_timeout(&receiver, 100), ==, 6);
+
+    clock_ms += 6;
+    munit_assert_uint64(chiaki_video_receiver_poll_timeout(&receiver, 100), ==, 100);
+    munit_assert_uint(idr_requests, ==, 1);
+    munit_assert_uint(frames, ==, 1);
+    chiaki_video_receiver_fini(&receiver);
+    return MUNIT_OK;
+}
+
+static MunitResult test_hevc_sparse_reference(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+    ChiakiBitstream bitstream;
+    ChiakiLog log;
+    chiaki_log_init(&log, 0, NULL, NULL);
+    chiaki_bitstream_init(&bitstream, &log, CHIAKI_CODEC_H265);
+    uint8_t profile_header[sizeof(header)];
+    memcpy(profile_header, header, sizeof(header));
+    munit_assert_true(chiaki_bitstream_header(&bitstream, profile_header, sizeof(profile_header)));
+
+    uint8_t sample[sizeof(idr)] = {0, 0, 0, 1, 2, 1};
+    unsigned pos = 48;
+    #define PUT_BIT(b) do { if(b) sample[pos >> 3] |= (uint8_t)(0x80u >> (pos & 7)); pos++; } while(0)
+    PUT_BIT(1); PUT_BIT(1); PUT_BIT(0); PUT_BIT(1); PUT_BIT(0); // First slice, PPS 0, P-slice.
+    const unsigned poc_bits = bitstream.h265.sps.log2_max_pic_order_cnt_lsb_minus4 + 4;
+    for(unsigned i = 0; i < poc_bits; ++i) PUT_BIT(1);
+    PUT_BIT(0); PUT_BIT(0); PUT_BIT(1); PUT_BIT(1); PUT_BIT(1); // Inline RPS, two negative pics, zero positive.
+    PUT_BIT(0); PUT_BIT(1); PUT_BIT(0); PUT_BIT(1); // delta 1, used: distance 2 (reference_frame 1).
+    PUT_BIT(0); PUT_BIT(1); PUT_BIT(1); PUT_BIT(0); // delta 2, unused: cumulative distance 5 (reference_frame 4).
+    PUT_BIT(1);
+    #undef PUT_BIT
+
+    ChiakiBitstreamSlice slice = {0};
+    munit_assert_true(chiaki_bitstream_slice(&bitstream, sample, sizeof(sample), &slice));
+    munit_assert_uint(slice.reference_frame, ==, 1);
+    munit_assert_false(chiaki_bitstream_slice_set_reference_frame(&bitstream, sample, sizeof(sample), 2));
+    munit_assert_true(chiaki_bitstream_slice_set_reference_frame(&bitstream, sample, sizeof(sample), 4));
+    munit_assert_true(chiaki_bitstream_slice(&bitstream, sample, sizeof(sample), &slice));
+    munit_assert_uint(slice.reference_frame, ==, 4);
+    return MUNIT_OK;
+}
+
+static MunitResult test_large_frame_spanning_reorder_window(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+    const uint8_t windows[] = {8, 16};
+    const uint64_t step_ms[] = {2, 3}; // 10 * 2 = 20 ms (> 8 ms), 10 * 3 = 30 ms (> 16 ms)
+    for(size_t w = 0; w < 2; ++w)
+    {
+        ChiakiSession session = {0};
+        ChiakiVideoReceiver receiver;
+        ChiakiLog log;
+        unsigned frames = 0;
+        initialize_receiver(&receiver, &session, &log, &frames, windows[w]);
+
+        for(uint16_t u = 0; u < 11; ++u)
+        {
+            if(u > 0)
+                clock_ms += step_ms[w];
+            send_large_unit(&receiver, 1, u);
+        }
+
+        munit_assert_uint(frames, ==, 1);
+        munit_assert_uint(idr_requests, ==, 0);
+        munit_assert_uint(corrupt_messages, ==, 0);
+        munit_assert_uint64(chiaki_video_receiver_get_recovery_stats(&receiver).reordered_frames, ==, 0);
+        chiaki_video_receiver_fini(&receiver);
+    }
+    return MUNIT_OK;
+}
+
+static MunitResult test_large_frame_reordered_unit_and_locked_deadline(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+    ChiakiSession session = {0};
+    ChiakiVideoReceiver receiver;
+    ChiakiLog log;
+    unsigned frames = 0;
+    initialize_receiver(&receiver, &session, &log, &frames, 8);
+
+    // Frame 1 spans 10 ms (> 8 ms window) and unit 3 is delayed 5 ms past last_unit.
+    for(uint16_t u = 0; u < 11; ++u)
+    {
+        if(u > 0)
+            clock_ms += 1;
+        if(u == 3)
+            continue;
+        send_large_unit(&receiver, 1, u);
+    }
+    munit_assert_uint(frames, ==, 0);
+    munit_assert_uint(idr_requests, ==, 0);
+    clock_ms += 5;
+    send_large_unit(&receiver, 1, 3);
+    munit_assert_uint(frames, ==, 1);
+    munit_assert_uint(idr_requests, ==, 0);
+    munit_assert_uint64(chiaki_video_receiver_get_recovery_stats(&receiver).reordered_frames, ==, 1);
+
+    // Frame 2 misses units 3 and 4. last_unit locks the 8 ms deadline; late unit 3 must NOT extend it.
+    clock_ms += 5;
+    for(uint16_t u = 0; u < 11; ++u)
+    {
+        if(u > 0)
+            clock_ms += 1;
+        if(u == 3 || u == 4)
+            continue;
+        send_large_unit(&receiver, 2, u);
+    }
+    munit_assert_uint64(chiaki_video_receiver_poll_timeout(&receiver, 100), ==, 8);
+    clock_ms += 5;
+    send_large_unit(&receiver, 2, 3); // Arrives during wait, unit 4 still missing.
+    munit_assert_uint64(chiaki_video_receiver_poll_timeout(&receiver, 100), ==, 3);
+    clock_ms += 3;
+    munit_assert_uint64(chiaki_video_receiver_poll_timeout(&receiver, 100), ==, 100);
+    munit_assert_uint(idr_requests, ==, 1);
+    munit_assert_uint(frames, ==, 1);
+
+    chiaki_video_receiver_fini(&receiver);
+    return MUNIT_OK;
+}
+
+static MunitResult test_promoted_large_next_frame_keeps_sliding_deadline(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+    ChiakiSession session = {0};
+    ChiakiVideoReceiver receiver;
+    ChiakiLog log;
+    unsigned frames = 0;
+    initialize_receiver(&receiver, &session, &log, &frames, 8);
+
+    // Frame 1 stalls after unit 0 (deadline = t + 8).
+    send_unit(&receiver, 1, 0);
+    clock_ms += 2;
+
+    // Large frame 2 streams units 0..5 into next_frame over t + 2 .. t + 7.
+    for(uint16_t u = 0; u <= 5; ++u)
+    {
+        if(u > 0)
+            clock_ms += 1;
+        send_large_unit(&receiver, 2, u);
+    }
+    munit_assert_uint(frames, ==, 0);
+    munit_assert_uint64(chiaki_video_receiver_poll_timeout(&receiver, 100), ==, 1);
+
+    // At t + 8, frame 1 expires and frame 2 is promoted with refreshed deadline (t + 7 + 8 = t + 15).
+    clock_ms += 1;
+    munit_assert_uint64(chiaki_video_receiver_poll_timeout(&receiver, 100), ==, 7);
+    munit_assert_uint(idr_requests, ==, 1);
+
+    // Remaining units 6..10 arrive over t + 10 .. t + 18 (past the original t + 2 + 8 = t + 10!).
+    for(uint16_t u = 6; u < 11; ++u)
+    {
+        clock_ms += 2;
+        send_large_unit(&receiver, 2, u);
+    }
+    munit_assert_uint(frames, ==, 1);
+    munit_assert_uint(idr_requests, ==, 1);
+    munit_assert_false(chiaki_video_receiver_get_waiting_for_idr(&receiver));
+
+    chiaki_video_receiver_fini(&receiver);
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     {"/reordered_hevc_units_and_lost_idr", test_reorder, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
     {"/fec_repair_needs_no_idr", test_fec_repaired, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
@@ -582,6 +811,12 @@ static MunitTest tests[] = {
     {"/always_request_idr_on_gap", test_always_request_idr_on_gap, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
     {"/next_frame_alloc_failure_leaves_slot_clean", test_next_frame_alloc_failure_leaves_slot_clean, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
     {"/reordered_profile_switch_emits_header_in_frame_order", test_reordered_profile_switch_emits_header_in_frame_order, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+    {"/idr_after_recovery_and_send_failure", test_idr_after_recovery_and_send_failure, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+    {"/idle_deadline_flushes_and_promotes", test_idle_deadline_flushes_and_promotes, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+    {"/hevc_sparse_reference", test_hevc_sparse_reference, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+    {"/large_frame_spanning_reorder_window", test_large_frame_spanning_reorder_window, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+    {"/large_frame_reordered_unit_and_locked_deadline", test_large_frame_reordered_unit_and_locked_deadline, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+    {"/promoted_large_next_frame_keeps_sliding_deadline", test_promoted_large_next_frame_keeps_sliding_deadline, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
     {NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
 };
 

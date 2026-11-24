@@ -55,12 +55,14 @@ CHIAKI_EXPORT void chiaki_video_receiver_init(ChiakiVideoReceiver *video_receive
 	chiaki_frame_processor_init(&video_receiver->next_frame_processor, video_receiver->log);
 	video_receiver->next_frame_index = -1;
 	video_receiver->next_frame_profile = -1;
-	video_receiver->next_frame_saw_last_unit = false;
+	video_receiver->next_frame_deadline_ms = 0;
+	video_receiver->next_frame_waited = false;
 	video_receiver->packet_stats = packet_stats;
 
 	video_receiver->frames_lost = 0;
 	video_receiver->frames_lost_total = 0;
 	video_receiver->reorder_deadline_ms = 0;
+	video_receiver->reorder_waited = false;
 	memset(&video_receiver->recovery_stats, 0, sizeof(video_receiver->recovery_stats));
 	memset(video_receiver->reference_frames, -1, sizeof(video_receiver->reference_frames));
 	chiaki_bitstream_init(&video_receiver->bitstream, video_receiver->log, video_receiver->session->connect_info.video_profile.codec);
@@ -84,8 +86,7 @@ CHIAKI_EXPORT void chiaki_video_receiver_set_waiting_for_idr(ChiakiVideoReceiver
 {
 	chiaki_mutex_lock(&video_receiver->waiting_for_idr_mutex);
 	video_receiver->waiting_for_idr = waiting_for_idr;
-	if(waiting_for_idr)
-		video_receiver->idr_request_last_ms = chiaki_time_now_monotonic_ms();
+	video_receiver->idr_request_last_ms = waiting_for_idr ? chiaki_time_now_monotonic_ms() : 0;
 	chiaki_mutex_unlock(&video_receiver->waiting_for_idr_mutex);
 }
 
@@ -103,23 +104,26 @@ static bool video_receiver_request_idr(ChiakiVideoReceiver *receiver)
 
     chiaki_mutex_lock(&receiver->waiting_for_idr_mutex);
     const uint64_t now_ms = chiaki_time_now_monotonic_ms();
-    const bool waiting = receiver->waiting_for_idr;
+    receiver->waiting_for_idr = true;
     const bool due = receiver->idr_request_last_ms == 0
         || now_ms - receiver->idr_request_last_ms >= interval_ms;
     if(due)
         receiver->idr_request_last_ms = now_ms;
     chiaki_mutex_unlock(&receiver->waiting_for_idr_mutex);
     if(!due)
-        return waiting;
+        return false;
 
     ChiakiErrorCode err = stream_connection_send_idr_request(&receiver->session->stream_connection);
     if(err != CHIAKI_ERR_SUCCESS)
     {
         CHIAKI_LOGW(receiver->log, "Could not request IDR frame: %s", chiaki_error_string(err));
-        return waiting;
+        chiaki_mutex_lock(&receiver->waiting_for_idr_mutex);
+        if(receiver->idr_request_last_ms == now_ms)
+            receiver->idr_request_last_ms = 0;
+        chiaki_mutex_unlock(&receiver->waiting_for_idr_mutex);
+        return false;
     }
 
-    chiaki_video_receiver_set_waiting_for_idr(receiver, true);
     chiaki_mutex_lock(&receiver->frames_lost_mutex);
     receiver->recovery_stats.idr_requests++;
     chiaki_mutex_unlock(&receiver->frames_lost_mutex);
@@ -200,6 +204,7 @@ static bool video_receiver_apply_profile(ChiakiVideoReceiver *video_receiver, in
 		return true;
 
 	video_receiver->profile_cur = profile_index;
+	memset(video_receiver->reference_frames, -1, sizeof(video_receiver->reference_frames));
 	ChiakiVideoProfile *profile = video_receiver->profiles + video_receiver->profile_cur;
 	CHIAKI_LOGI(video_receiver->log, "Switched to profile %d, resolution: %ux%u",
 		video_receiver->profile_cur, profile->width, profile->height);
@@ -211,7 +216,7 @@ static bool video_receiver_apply_profile(ChiakiVideoReceiver *video_receiver, in
 	return true;
 }
 
-static void video_receiver_promote_next_frame(ChiakiVideoReceiver *video_receiver, uint64_t now_ms, uint8_t reorder_window)
+static void video_receiver_promote_next_frame(ChiakiVideoReceiver *video_receiver)
 {
 	if(video_receiver->next_frame_index < 0)
 		return;
@@ -224,27 +229,53 @@ static void video_receiver_promote_next_frame(ChiakiVideoReceiver *video_receive
 	video_receiver->next_frame_index = -1;
 	const int promoted_profile = video_receiver->next_frame_profile;
 	video_receiver->next_frame_profile = -1;
-	const bool saw_last = video_receiver->next_frame_saw_last_unit;
-	video_receiver->next_frame_saw_last_unit = false;
 	video_receiver->frame_follows_gap = false;
-	video_receiver->reorder_deadline_ms = 0;
+	video_receiver->reorder_deadline_ms = video_receiver->next_frame_deadline_ms;
+	video_receiver->next_frame_deadline_ms = 0;
+	video_receiver->reorder_waited = video_receiver->next_frame_waited;
+	video_receiver->next_frame_waited = false;
 
 	if(promoted_profile >= 0)
 		video_receiver_apply_profile(video_receiver, promoted_profile);
 
-	if(chiaki_frame_processor_flush_possible(&video_receiver->frame_processor) || (saw_last && !reorder_window))
+	if(chiaki_frame_processor_flush_possible(&video_receiver->frame_processor))
 	{
 		ChiakiErrorCode err = chiaki_video_receiver_flush_frame(video_receiver);
 		if(err != CHIAKI_ERR_SUCCESS)
 			CHIAKI_LOGW(video_receiver->log, "Video receiver could not flush promoted frame.");
 	}
-	else if(saw_last && reorder_window)
-		video_receiver->reorder_deadline_ms = now_ms + reorder_window;
+}
+
+static void video_receiver_flush_expired(ChiakiVideoReceiver *video_receiver, uint64_t now_ms)
+{
+	while(video_receiver->reorder_deadline_ms && now_ms >= video_receiver->reorder_deadline_ms)
+	{
+		video_receiver->reorder_waited = true;
+		if(chiaki_video_receiver_flush_frame(video_receiver) != CHIAKI_ERR_SUCCESS)
+			CHIAKI_LOGW(video_receiver->log, "Video receiver could not flush expired frame.");
+		video_receiver_promote_next_frame(video_receiver);
+	}
+}
+
+// Runs on the same Takion thread that dispatches AV packets.
+CHIAKI_EXPORT uint64_t chiaki_video_receiver_poll_timeout(ChiakiVideoReceiver *video_receiver, uint64_t timeout_ms)
+{
+	if(!video_receiver->reorder_deadline_ms)
+		return timeout_ms;
+	const uint64_t now_ms = chiaki_time_now_monotonic_ms();
+	video_receiver_flush_expired(video_receiver, now_ms);
+	if(video_receiver->reorder_deadline_ms && video_receiver->reorder_deadline_ms - now_ms < timeout_ms)
+		return video_receiver->reorder_deadline_ms - now_ms;
+	return timeout_ms;
 }
 
 CHIAKI_EXPORT void chiaki_video_receiver_av_packet(ChiakiVideoReceiver *video_receiver, ChiakiTakionAVPacket *packet)
 {
-	// old frame?
+	const uint8_t reorder_window = video_receiver->session->connect_info.video_reorder_window_ms;
+	const uint64_t now_ms = reorder_window ? chiaki_time_now_monotonic_ms() : 0;
+	video_receiver_flush_expired(video_receiver, now_ms);
+
+	// Old frame?
 	ChiakiSeqNum16 frame_index = packet->frame_index;
 	ChiakiErrorCode err = CHIAKI_ERR_SUCCESS;
 	if(video_receiver->frame_index_cur >= 0
@@ -262,46 +293,38 @@ CHIAKI_EXPORT void chiaki_video_receiver_av_packet(ChiakiVideoReceiver *video_re
 		return;
 	}
 
-	const uint8_t reorder_window = video_receiver->session->connect_info.video_reorder_window_ms;
-	const uint64_t now_ms = reorder_window ? chiaki_time_now_monotonic_ms() : 0;
-
-	// Cross-frame reordering: if current frame N is still incomplete and within reorder_window,
-	// buffer early packets of frame N+1 in next_frame_processor instead of prematurely killing frame N.
-	if(reorder_window > 0
-		&& video_receiver->frame_index_cur >= 0
+	// Buffer early packets for N+1 while there is still time to complete frame N.
+	if(reorder_window && video_receiver->frame_index_cur >= 0
 		&& video_receiver->frame_index_prev != video_receiver->frame_index_cur
 		&& frame_index == (ChiakiSeqNum16)(video_receiver->frame_index_cur + 1))
 	{
-		const bool expired = video_receiver->reorder_deadline_ms && now_ms >= video_receiver->reorder_deadline_ms;
-		if(!expired)
+		video_receiver->reorder_waited = true;
+		if(video_receiver->next_frame_index < 0)
 		{
-			if(!video_receiver->reorder_deadline_ms)
-				video_receiver->reorder_deadline_ms = now_ms + reorder_window;
-			if(video_receiver->next_frame_index < 0)
-			{
-				err = chiaki_frame_processor_alloc_frame(&video_receiver->next_frame_processor, packet);
-				if(err != CHIAKI_ERR_SUCCESS)
-				{
-					CHIAKI_LOGW(video_receiver->log, "Video receiver could not allocate next frame for packet.");
-					return;
-				}
-				video_receiver->next_frame_index = frame_index;
-				video_receiver->next_frame_saw_last_unit = false;
-			}
-			video_receiver->next_frame_profile = packet->adaptive_stream_index;
-			err = chiaki_frame_processor_put_unit(&video_receiver->next_frame_processor, packet);
+			err = chiaki_frame_processor_alloc_frame(&video_receiver->next_frame_processor, packet);
 			if(err != CHIAKI_ERR_SUCCESS)
-				CHIAKI_LOGW(video_receiver->log, "Video receiver could not put unit into next frame.");
-			if(packet->unit_index == packet->units_in_frame_total - 1)
-				video_receiver->next_frame_saw_last_unit = true;
-			return;
+			{
+				CHIAKI_LOGW(video_receiver->log, "Video receiver could not allocate next frame for packet.");
+				return;
+			}
+			video_receiver->next_frame_index = frame_index;
+			video_receiver->next_frame_deadline_ms = now_ms + reorder_window;
+			video_receiver->next_frame_waited = false;
 		}
-		// Deadline expired: flush frame N and promote N+1 (if already buffered) before handling this packet.
-		err = chiaki_video_receiver_flush_frame(video_receiver);
+		video_receiver->next_frame_profile = packet->adaptive_stream_index;
+		err = chiaki_frame_processor_put_unit(&video_receiver->next_frame_processor, packet);
 		if(err != CHIAKI_ERR_SUCCESS)
-			CHIAKI_LOGW(video_receiver->log, "Video receiver could not flush expired frame.");
-		if(video_receiver->next_frame_index == frame_index)
-			video_receiver_promote_next_frame(video_receiver, now_ms, reorder_window);
+			CHIAKI_LOGW(video_receiver->log, "Video receiver could not put unit into next frame.");
+		else
+		{
+			const bool last_unit = packet->unit_index == packet->units_in_frame_total - 1;
+			const bool flush_possible = chiaki_frame_processor_flush_possible(&video_receiver->next_frame_processor);
+			if(!video_receiver->next_frame_waited)
+				video_receiver->next_frame_deadline_ms = now_ms + reorder_window;
+			if(last_unit && !flush_possible)
+				video_receiver->next_frame_waited = true;
+		}
+		return;
 	}
 
 	// next frame?
@@ -312,7 +335,7 @@ CHIAKI_EXPORT void chiaki_video_receiver_av_packet(ChiakiVideoReceiver *video_re
 		{
 			if(video_receiver->frame_index_cur >= 0 && video_receiver->frame_index_prev != video_receiver->frame_index_cur)
 				chiaki_video_receiver_flush_frame(video_receiver);
-			video_receiver_promote_next_frame(video_receiver, now_ms, reorder_window);
+			video_receiver_promote_next_frame(video_receiver);
 		}
 		if(video_receiver->frame_index_cur < 0 ||
 			chiaki_seq_num_16_gt(frame_index, (ChiakiSeqNum16)video_receiver->frame_index_cur))
@@ -344,26 +367,24 @@ CHIAKI_EXPORT void chiaki_video_receiver_av_packet(ChiakiVideoReceiver *video_re
 			}
 
 			video_receiver->frame_index_cur = frame_index;
-			video_receiver->reorder_deadline_ms = 0;
 			err = chiaki_frame_processor_alloc_frame(&video_receiver->frame_processor, packet);
 			if(err != CHIAKI_ERR_SUCCESS)
+			{
 				CHIAKI_LOGW(video_receiver->log, "Video receiver could not allocate frame for packet.");
+				chiaki_frame_processor_fini(&video_receiver->frame_processor);
+				chiaki_frame_processor_init(&video_receiver->frame_processor, video_receiver->log);
+				video_receiver->frame_index_prev = video_receiver->frame_index_cur;
+				return;
+			}
+			video_receiver->reorder_deadline_ms = reorder_window ? now_ms + reorder_window : 0;
 		}
 	}
 
-	video_receiver_apply_profile(video_receiver, packet->adaptive_stream_index);
+	if(video_receiver->frame_index_prev != video_receiver->frame_index_cur)
+		video_receiver_apply_profile(video_receiver, packet->adaptive_stream_index);
 
-	if(video_receiver->reorder_deadline_ms && now_ms >= video_receiver->reorder_deadline_ms
-		&& video_receiver->frame_index_cur != video_receiver->frame_index_prev)
-	{
-		chiaki_video_receiver_flush_frame(video_receiver);
-		if(video_receiver->next_frame_index >= 0)
-			video_receiver_promote_next_frame(video_receiver, now_ms, reorder_window);
-		return;
-	}
-
-	err = chiaki_frame_processor_put_unit(&video_receiver->frame_processor, packet);
-	if(err != CHIAKI_ERR_SUCCESS)
+	const ChiakiErrorCode put_err = chiaki_frame_processor_put_unit(&video_receiver->frame_processor, packet);
+	if(put_err != CHIAKI_ERR_SUCCESS)
 		CHIAKI_LOGW(video_receiver->log, "Video receiver could not put unit.");
 
 	// if we are currently building up a frame
@@ -371,22 +392,29 @@ CHIAKI_EXPORT void chiaki_video_receiver_av_packet(ChiakiVideoReceiver *video_re
 	{
 		// if we already have enough for the whole frame, flush it already
 		const bool last_unit = packet->unit_index == packet->units_in_frame_total - 1;
-		if(chiaki_frame_processor_flush_possible(&video_receiver->frame_processor) || (last_unit && !reorder_window))
+		const bool flush_possible = chiaki_frame_processor_flush_possible(&video_receiver->frame_processor);
+		// Keep sliding the inactivity deadline while packets of a large frame are still arriving;
+		// once last_unit arrives incomplete or N+1 starts, lock the deadline to wait at most reorder_window.
+		if(put_err == CHIAKI_ERR_SUCCESS && reorder_window
+			&& !video_receiver->reorder_waited && video_receiver->next_frame_index < 0)
+			video_receiver->reorder_deadline_ms = now_ms + reorder_window;
+		if(last_unit && reorder_window && !flush_possible)
+			video_receiver->reorder_waited = true;
+		if(flush_possible || (last_unit && !reorder_window))
 		{
 			err = chiaki_video_receiver_flush_frame(video_receiver);
 			if(video_receiver->next_frame_index >= 0)
-				video_receiver_promote_next_frame(video_receiver, now_ms, reorder_window);
+				video_receiver_promote_next_frame(video_receiver);
+			if(err != CHIAKI_ERR_SUCCESS)
+				CHIAKI_LOGW(video_receiver->log, "Video receiver could not flush frame.");
 		}
-		else if(last_unit && !video_receiver->reorder_deadline_ms)
-			video_receiver->reorder_deadline_ms = now_ms + reorder_window;
-		if(err != CHIAKI_ERR_SUCCESS)
-			CHIAKI_LOGW(video_receiver->log, "Video receiver could not flush frame.");
 	}
 }
 
 static ChiakiErrorCode chiaki_video_receiver_flush_frame(ChiakiVideoReceiver *video_receiver)
 {
-    const bool waited_for_reorder = video_receiver->reorder_deadline_ms != 0;
+    const bool waited_for_reorder = video_receiver->reorder_waited;
+    video_receiver->reorder_waited = false;
     video_receiver->reorder_deadline_ms = 0;
     uint8_t *frame;
     size_t frame_size;
@@ -515,6 +543,8 @@ static ChiakiErrorCode chiaki_video_receiver_flush_frame(ChiakiVideoReceiver *vi
                 video_receiver->recovery_stats.has_recovered = true;
             }
             chiaki_mutex_unlock(&video_receiver->frames_lost_mutex);
+			if(slice_parsed && slice.is_idr)
+				memset(video_receiver->reference_frames, -1, sizeof(video_receiver->reference_frames));
 			add_ref_frame(video_receiver, video_receiver->frame_index_cur);
 			CHIAKI_LOGV(video_receiver->log, "Added reference %c frame %d", slice.slice_type == CHIAKI_BITSTREAM_SLICE_I ? 'I' : 'P', (int)video_receiver->frame_index_cur);
 		}

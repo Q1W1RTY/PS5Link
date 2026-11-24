@@ -2,6 +2,22 @@
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
 #include <settings.h>
+#ifdef PS5LINK_BUILD
+#include <QDir>
+#include <QEventLoop>
+#include <QLockFile>
+#include <discoverymanager.h>
+#include <QJsonArray>
+#include <QTimer>
+#include <QUrlQuery>
+#include <psnaccountid.h>
+#include <QRegularExpression>
+#include <functional>
+#include <optional>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <cstdio>
+#endif
 #include <SDL.h>
 #include <QDir>
 #include <QFile>
@@ -265,17 +281,24 @@ static void MigrateControllerMappings(QSettings *settings)
 	settings->endArray();
 }
 
-Settings::Settings(const QString &conf, QObject *parent) : QObject(parent),
+Settings::Settings(const QString &conf, QObject *parent) : Settings(conf, parent, true)
+{
+}
+
+Settings::Settings(const QString &conf, QObject *parent, bool initialize) : QObject(parent),
 	time_format("yyyy-MM-dd HH:mm:ss t"),
 	settings(QSettings::defaultFormat(), QSettings::UserScope, QCoreApplication::organizationName(), conf.isEmpty() ? QCoreApplication::applicationName() : QStringLiteral("%1-%2").arg(QCoreApplication::applicationName(), conf)),
 	default_settings(QSettings::defaultFormat(), QSettings::UserScope, QCoreApplication::organizationName(), QCoreApplication::applicationName()),
 	placebo_settings(QSettings::defaultFormat(), QSettings::UserScope, QCoreApplication::organizationName(), QStringLiteral("pl_render_params"))
 {
 	settings.setFallbacksEnabled(false);
+	manual_hosts_id_next = 0;
+	if(!initialize)
+		return;
+
 	MigrateSettings(&settings);
 	MigrateVideoProfile(&settings);
 	MigrateControllerMappings(&settings);
-	manual_hosts_id_next = 0;
 	settings.setValue("version", SETTINGS_VERSION);
 	LoadRegisteredHosts();
 	LoadHiddenHosts();
@@ -290,20 +313,457 @@ Settings::Settings(const QString &conf, QObject *parent) : QObject(parent),
 	MigrateLegacyFrameMixerSetting(&settings, &placebo_settings, &profiles);
 }
 
-void Settings::ExportSettings(QString filepath)
+#ifdef PS5LINK_BUILD
+int Settings::RunLauncherSettingsCommand(const QString &profile, bool write)
+{
+    Settings active(profile, nullptr, false);
+    auto &settings = active.settings;
+    static constexpr int heights[] = {0, 1, 1800, 2160};
+    static constexpr int lightbars[] = {1, 3, 2, 0};
+    static constexpr int polling[] = {1, 2, 4, 8};
+    const auto indexOf = [](const auto &values, int value) {
+        for(int i = 0; i < int(sizeof(values) / sizeof(values[0])); ++i)
+            if(values[i] == value)
+                return i;
+        return 0;
+    };
+
+    const int sr = active.GetDx12DlssSr();
+    const int vsr = qBound(0, active.GetRtxVsrQuality(), 4);
+    const int timing = active.GetDx12PresentMode();
+    const int upscale = active.GetDx12Enabled() && sr ? sr + 5 : vsr ? vsr + 1
+        : active.GetDx12Enabled() && active.GetDx12Fsr() ? 1 : 0;
+    const QJsonObject values{
+        {"Dx12", active.GetDx12Enabled()},
+        {"Timing", timing == 2 ? 2 : 1 - timing},
+        {"Generator", active.GetDx12FrameGeneration()},
+        {"Upscale", upscale},
+        {"Target", indexOf(heights, active.GetDx12UpscaleHeight())},
+        {"Buffer", active.GetVideoReorderWindowMs() / 8},
+        {"Recover", active.GetIDROnFECFailureEnabled()},
+        {"AdaptiveTriggers", active.GetEnableAdaptiveTriggers()},
+        {"Haptics", active.GetEnableRumble()},
+        {"BtSpeaker", active.GetBtSpeakerAudio()},
+        {"MutePcAudio", active.GetMutePcAudioWithDualSenseHeadphones()},
+        {"MicUnmuted", active.GetStartMicUnmuted()},
+        {"Lightbar", indexOf(lightbars, active.GetLightbarMode())},
+        {"Polling", indexOf(polling, active.GetControllerPollingMs())},
+    };
+    struct AdvancedField
+    {
+        QJsonValue value;
+        int min;
+        int max;
+        std::function<void(QJsonValue)> apply;
+        QSet<int> choices;
+    };
+    QMap<QString, AdvancedField> fields;
+    const auto add = [&](const char *key, auto getter, auto setter, int min = 0, int max = 0, QSet<int> choices = {}) {
+        const auto value = (active.*getter)();
+        using Type = std::decay_t<decltype(value)>;
+        QJsonValue json;
+        if constexpr(std::is_same_v<Type, bool>)
+            json = value;
+        else
+            json = int(value);
+        fields.insert(QLatin1String(key), {json, min, max, [&, setter](QJsonValue input) {
+            if constexpr(std::is_same_v<Type, bool>)
+                (active.*setter)(input.toBool());
+            else
+                (active.*setter)(static_cast<Type>(input.toInt()));
+        }, std::move(choices)});
+    };
+
+    add("LocalResolution", &Settings::GetResolutionLocalPS5, &Settings::SetResolutionLocalPS5, 1, 4);
+    add("RemoteResolution", &Settings::GetResolutionRemotePS5, &Settings::SetResolutionRemotePS5, 1, 4);
+    add("LocalFps", &Settings::GetFPSLocalPS5, &Settings::SetFPSLocalPS5, 30, 60, {30, 60});
+    add("RemoteFps", &Settings::GetFPSRemotePS5, &Settings::SetFPSRemotePS5, 30, 60, {30, 60});
+    add("LocalBitrate", &Settings::GetBitrateLocalPS5, &Settings::SetBitrateLocalPS5, 0, 150000);
+    add("RemoteBitrate", &Settings::GetBitrateRemotePS5, &Settings::SetBitrateRemotePS5, 0, 150000);
+    add("LocalCodec", &Settings::GetCodecLocalPS5, &Settings::SetCodecLocalPS5, 0, 2);
+    add("RemoteCodec", &Settings::GetCodecRemotePS5, &Settings::SetCodecRemotePS5, 0, 2);
+    add("Discovery", &Settings::GetDiscoveryEnabled, &Settings::SetDiscoveryEnabled);
+    add("WifiMode", &Settings::GetWifiStreamingMode, &Settings::SetWifiStreamingMode);
+    add("AlwaysIdr", &Settings::GetAlwaysRequestIdr, &Settings::SetAlwaysRequestIdr);
+    add("Stats", &Settings::GetShowStreamStats, &Settings::SetShowStreamStats);
+    add("KeepDisplayAwake", &Settings::GetPreventDisplaySleep, &Settings::SetPreventDisplaySleep);
+    add("DisconnectAction", &Settings::GetDisconnectAction, &Settings::SetDisconnectAction, 0, 2);
+    add("SuspendAction", &Settings::GetSuspendAction, &Settings::SetSuspendAction, 0, 1);
+    add("Renderer", &Settings::GetRenderBackend, &Settings::SetRenderBackend, 0, 1);
+    add("StandardWindow", &Settings::GetWindowType, &Settings::SetWindowType, 0, 5);
+    add("WindowWidth", &Settings::GetCustomResolutionWidth, &Settings::SetCustomResolutionWidth, 320, 15360);
+    add("WindowHeight", &Settings::GetCustomResolutionHeight, &Settings::SetCustomResolutionHeight, 180, 8640);
+    add("ZeroCopy", &Settings::GetUseZeroCopy, &Settings::SetUseZeroCopy);
+    add("Dx12Window", &Settings::GetDx12WindowMode, &Settings::SetDx12WindowMode, 0, 2);
+    add("PictureAspect", &Settings::GetDx12Aspect, &Settings::SetDx12Aspect, 0, 3);
+    add("AmbientStyle", &Settings::GetDx12AmbientStyle, &Settings::SetDx12AmbientStyle, 0, 2);
+    add("Sharpness", &Settings::GetDx12Sharpness, &Settings::SetDx12Sharpness, -1, 100);
+    add("VideoConcealment", &Settings::GetDx12ErrorConcealment, &Settings::SetDx12ErrorConcealment);
+    add("Dither", &Settings::GetDx12Dither, &Settings::SetDx12Dither);
+    add("Deband", &Settings::GetDx12Deband, &Settings::SetDx12Deband);
+    add("Hdr", &Settings::GetDx12HdrPassthrough, &Settings::SetDx12HdrPassthrough);
+    add("HdrPaperWhite", &Settings::GetDx12HdrPaperWhite, &Settings::SetDx12HdrPaperWhite, 120, 400);
+    add("Contrast", &Settings::GetDx12Contrast, &Settings::SetDx12Contrast, 80, 130);
+    add("Saturation", &Settings::GetDx12Saturation, &Settings::SetDx12Saturation, 50, 150);
+    add("Gamma", &Settings::GetDx12Gamma, &Settings::SetDx12Gamma, 80, 125);
+    add("GyroReset", &Settings::GetEnableGyroReset, &Settings::SetEnableGyroReset);
+    add("GamepadQuit", &Settings::GetGamepadQuitHotkey, &Settings::SetGamepadQuitHotkey);
+    add("Keyboard", &Settings::GetKeyboardEnabled, &Settings::SetKeyboardEnabled);
+    add("MouseTouch", &Settings::GetMouseTouchEnabled, &Settings::SetMouseTouchEnabled);
+    add("RumbleIntensity", &Settings::GetRumbleHapticsIntensity, &Settings::SetRumbleHapticsIntensity, 0, 5);
+    add("SystemVolume", &Settings::GetVolumeControlsSystem, &Settings::SetVolumeControlsSystem);
+
+    QJsonArray consoles;
+    const int consoleCount = settings.beginReadArray("registered_hosts");
+    for(int index = 0; index < consoleCount; ++index)
+    {
+        settings.setArrayIndex(index);
+        const auto mac = settings.value("server_mac").toByteArray();
+        if(mac.size() != 6)
+            continue;
+        const auto target = static_cast<ChiakiTarget>(settings.value("target").toUInt());
+        consoles.append(QJsonObject{{"Id", QString::fromLatin1(mac.toHex())},
+            {"Name", settings.value("server_nickname").toString()}, {"Ps5", chiaki_target_is_ps5(target)}});
+    }
+    settings.endArray();
+    const auto preferredMac = settings.value("settings/auto_connect_mac").toByteArray();
+    const auto preferredConsole = QString::fromLatin1(preferredMac.toHex());
+    if(!write)
+    {
+        QJsonArray missing;
+        const auto markMissing = [&](const char *field, const char *key) {
+            if(!settings.contains(QLatin1String(key)))
+                missing.append(QLatin1String(field));
+        };
+        markMissing("Dx12", "settings/dx12_enabled");
+        markMissing("Timing", "settings/dx12_present_mode");
+        if(!settings.contains("settings/dx12_interpolation"))
+            markMissing("Generator", "settings/dx12_frame_generation");
+        if(!settings.contains("settings/dx12_fsr") && !settings.contains("settings/dx12_dlss_sr"))
+            markMissing("Upscale", "settings/rtx_vsr_quality");
+        markMissing("Target", "settings/dx12_upscale_height");
+        markMissing("Buffer", "settings/video_reorder_window_ms");
+        markMissing("Recover", "settings/idr_on_fec_failure");
+        markMissing("AdaptiveTriggers", "settings/enable_adaptive_triggers");
+        markMissing("Haptics", "settings/enable_rumble");
+        markMissing("BtSpeaker", "settings/bt_speaker_audio");
+        markMissing("MicUnmuted", "settings/start_mic_unmuted");
+        markMissing("Lightbar", "settings/lightbar_mode");
+        markMissing("Polling", "settings/controller_polling_ms");
+        QJsonObject advanced;
+        for(auto it = fields.constBegin(); it != fields.constEnd(); ++it)
+            advanced.insert(it.key(), it->value);
+        active.default_settings.setFallbacksEnabled(false);
+        active.LoadProfiles();
+        QJsonArray profiles{QString()};
+        for(const auto &name : active.GetProfiles())
+            if(!name.isEmpty())
+                profiles.append(name);
+        const auto json = QJsonDocument(QJsonObject{{"Profile", profile}, {"Values", values}, {"Missing", missing},
+            {"Advanced", advanced}, {"Consoles", consoles}, {"PreferredConsole", preferredConsole}, {"Profiles", profiles},
+            {"PsnLinked", !settings.value("settings/psn_refresh_token").toByteArray().isEmpty()}}).toJson(QJsonDocument::Compact);
+        return std::fwrite(json.constData(), 1, json.size(), stdout) == size_t(json.size()) && std::fflush(stdout) == 0 ? 0 : 1;
+    }
+
+    char input[4096];
+    const auto bytes = std::fread(input, 1, sizeof(input), stdin);
+    if(bytes == sizeof(input) || std::ferror(stdin))
+        return 2;
+    const auto document = QJsonDocument::fromJson(QByteArray(input, bytes));
+    if(!document.isObject())
+        return 2;
+    const auto request = document.object();
+    const auto expectedProfile = request.value("Profile");
+    if(!expectedProfile.isString() || expectedProfile.toString() != profile)
+        return 3;
+    if(!request.value("Values").isObject())
+        return 2;
+    const auto patch = request.value("Values").toObject();
+    const QJsonObject limits{{"Timing", 2}, {"Generator", 3}, {"Upscale", 7}, {"Target", 3},
+        {"Buffer", 2}, {"Lightbar", 3}, {"Polling", 3}};
+    for(auto it = patch.constBegin(); it != patch.constEnd(); ++it)
+    {
+        const auto current = values.value(it.key());
+        if(current.isBool() && it.value().isBool())
+            continue;
+        const int value = it.value().toInt(-1);
+        if(!current.isDouble() || value < 0 || value > limits.value(it.key()).toInt(-1))
+            return 2;
+    }
+
+    if(request.contains("Advanced") && !request.value("Advanced").isObject())
+        return 2;
+    const auto advanced = request.value("Advanced").toObject();
+    for(auto it = advanced.constBegin(); it != advanced.constEnd(); ++it)
+    {
+        const auto field = fields.constFind(it.key());
+        if(field == fields.constEnd())
+            return 2;
+        if(field->value.isBool())
+        {
+            if(!it.value().isBool())
+                return 2;
+        }
+        else
+        {
+            const auto value = it.value().toInt(field->min - 1);
+            if(value < field->min || value > field->max || (!field->choices.isEmpty() && !field->choices.contains(value)))
+                return 2;
+        }
+    }
+    if(request.contains("PreferredConsole"))
+    {
+        if(!request.value("PreferredConsole").isString())
+            return 2;
+        const auto target = request.value("PreferredConsole").toString();
+        bool valid = target.isEmpty();
+        for(const auto &console : consoles)
+            valid |= console.toObject().value("Id").toString() == target;
+        if(!valid)
+            return 2;
+        active.SetAutoConnectHost(QByteArray::fromHex(target.toLatin1()));
+    }
+    for(auto it = advanced.constBegin(); it != advanced.constEnd(); ++it)
+        fields.constFind(it.key())->apply(it.value());
+
+    const auto apply = [&](const char *key, auto setter) {
+        if(patch.contains(QLatin1String(key)))
+            setter(patch.value(QLatin1String(key)));
+    };
+    apply("Dx12", [&](auto v) { active.SetDx12Enabled(v.toBool()); });
+    apply("Timing", [&](auto v) { const int value = v.toInt(); active.SetDx12PresentMode(value == 2 ? 2 : 1 - value); });
+    apply("Generator", [&](auto v) { active.SetDx12FrameGeneration(v.toInt()); });
+    apply("Upscale", [&](auto v) {
+        const int scaler = v.toInt();
+        active.SetDx12Fsr(scaler == 1);
+        active.SetRtxVsrQuality(scaler >= 2 && scaler <= 5 ? scaler - 1 : 0);
+        active.SetDx12DlssSr(scaler >= 6 ? scaler - 5 : 0);
+    });
+    apply("Target", [&](auto v) { active.SetDx12UpscaleHeight(heights[v.toInt()]); });
+    apply("Buffer", [&](auto v) { active.SetVideoReorderWindowMs(v.toInt() * 8); });
+    apply("Recover", [&](auto v) { active.SetIDROnFECFailureEnabled(v.toBool()); });
+    apply("AdaptiveTriggers", [&](auto v) { active.SetEnableAdaptiveTriggers(v.toBool()); });
+    apply("Haptics", [&](auto v) { active.SetEnableRumble(v.toBool()); });
+    apply("BtSpeaker", [&](auto v) { active.SetBtSpeakerAudio(v.toBool()); });
+    apply("MutePcAudio", [&](auto v) { active.SetMutePcAudioWithDualSenseHeadphones(v.toBool()); });
+    apply("MicUnmuted", [&](auto v) { active.SetStartMicUnmuted(v.toBool()); });
+    apply("Lightbar", [&](auto v) { active.SetLightbarMode(lightbars[v.toInt()]); });
+    apply("Polling", [&](auto v) { active.SetControllerPollingMs(polling[v.toInt()]); });
+    settings.sync();
+    return settings.status() == QSettings::NoError ? 0 : 1;
+}
+int Settings::RunLauncherProfileCommand(const QString &profile, const QString &operation, const QString &value)
+{
+    Settings active(profile, nullptr, false);
+    active.default_settings.setFallbacksEnabled(false);
+    if(operation != "export" && !QDir().mkpath(QFileInfo(active.default_settings.fileName()).absolutePath()))
+        return 1;
+    QLockFile profileLock(active.default_settings.fileName() + ".launcher-profile.lock");
+    if(operation != "export" && !profileLock.tryLock(1000))
+        return 1;
+    active.default_settings.sync();
+    active.LoadProfiles();
+    if(operation == "switch")
+    {
+        if(!value.isEmpty() && !active.profiles.contains(value))
+            return 2;
+        // Switching from the launcher should have the same effect as selecting a profile in the client.
+        active.SetCurrentProfile(value);
+        active.default_settings.sync();
+        return active.default_settings.status() == QSettings::NoError ? 0 : 1;
+    }
+
+    const QFileInfo file(value);
+    if(!file.isAbsolute() || file.suffix().compare("ini", Qt::CaseInsensitive) != 0)
+        return 2;
+    if(operation == "export")
+    {
+        // An export must never overwrite application-owned settings.
+        const QFileInfo profileFile(active.settings.fileName());
+        if(QDir::cleanPath(file.absolutePath()).compare(QDir::cleanPath(profileFile.absolutePath()), Qt::CaseInsensitive) == 0
+            || (!file.canonicalFilePath().isEmpty()
+                && QFileInfo(file.canonicalFilePath()).absolutePath().compare(profileFile.canonicalPath(), Qt::CaseInsensitive) == 0))
+            return 2;
+        active.LoadRegisteredHosts();
+        active.LoadHiddenHosts();
+        active.LoadManualHosts();
+        active.LoadControllerMappings();
+        return active.ExportSettings(value) ? 0 : 1;
+    }
+    if(operation != "import" || !file.isFile() || !file.isReadable())
+        return 2;
+
+    QString name = file.completeBaseName().left(60);
+    name.replace(QRegularExpression(QStringLiteral("[^\\p{L}\\p{N} _.-]")), QStringLiteral("_"));
+    name = name.trimmed();
+    if(name.isEmpty())
+        name = QStringLiteral("Imported profile");
+    const auto exists = [&](const QString &candidate) {
+        Settings existing(candidate, nullptr, false);
+        return QStringList(active.profiles).contains(candidate, Qt::CaseInsensitive)
+            || QFileInfo::exists(existing.settings.fileName());
+    };
+    const QString base = name;
+    for(int suffix = 2; exists(name); ++suffix)
+        name = QStringLiteral("%1 (%2)").arg(base).arg(suffix);
+    return active.ImportSettings(value, name) ? 0 : 4;
+}
+
+int Settings::RunLauncherSetupCommand(const QString &profile, const QString &operation)
+{
+    if(chiaki_lib_init() != CHIAKI_ERR_SUCCESS)
+        return 1;
+
+    if(operation == "psn-url")
+    {
+        char duid[CHIAKI_DUID_STR_SIZE];
+        size_t length = sizeof(duid);
+        chiaki_holepunch_generate_client_device_uid(duid, &length);
+        const QUrl url(PSNAuth::LOGIN_URL + "duid=" + QString::fromLatin1(duid) + "&");
+        const auto response = QJsonDocument(QJsonObject{{"Url", QString::fromLatin1(url.toEncoded())}}).toJson(QJsonDocument::Compact);
+        return std::fwrite(response.constData(), 1, response.size(), stdout) == size_t(response.size())
+            && std::fflush(stdout) == 0 ? 0 : 1;
+    }
+
+    if(operation == "discover")
+    {
+        qRegisterMetaType<QList<DiscoveryHost>>();
+        DiscoveryManager discovery(nullptr, false);
+        QEventLoop loop;
+        discovery.SetActive(true);
+        QTimer::singleShot(2600, &loop, &QEventLoop::quit);
+        loop.exec();
+        QJsonArray devices;
+        for(const auto &host : discovery.GetHosts())
+            if(!host.host_addr.isEmpty())
+                devices.append(QJsonObject{{"Name", host.host_name}, {"Address", host.host_addr}, {"Ps5", host.ps5}});
+        const auto response = QJsonDocument(devices).toJson(QJsonDocument::Compact);
+        return std::fwrite(response.constData(), 1, response.size(), stdout) == size_t(response.size())
+            && std::fflush(stdout) == 0 ? 0 : 1;
+    }
+
+    char input[8192];
+    const size_t count = std::fread(input, 1, sizeof(input), stdin);
+    if(count == sizeof(input) || std::ferror(stdin))
+        return 2;
+    const auto request = QJsonDocument::fromJson(QByteArray(input, count)).object();
+    if(!request.value("Profile").isString() || request.value("Profile").toString() != profile)
+        return 3;
+    Settings active(profile, nullptr, false);
+    active.default_settings.setFallbacksEnabled(false);
+    QEventLoop loop;
+    QTimer deadline;
+    deadline.setSingleShot(true);
+
+    if(operation == "psn-login")
+    {
+        const QUrl expected(QString::fromStdString(PSNAuth::REDIRECT_PAGE));
+        const QUrl redirect(request.value("Redirect").toString(), QUrl::StrictMode);
+        const auto codes = QUrlQuery(redirect).allQueryItemValues("code", QUrl::FullyDecoded);
+        if(!redirect.isValid() || redirect.scheme() != expected.scheme() || redirect.host() != expected.host()
+            || redirect.port(443) != expected.port(443) || redirect.path() != expected.path()
+            || !redirect.userInfo().isEmpty() || codes.size() != 1 || codes.first().isEmpty())
+            return 2;
+
+        PSNAccountID psn(&active, nullptr, false);
+        bool success = false;
+        QObject::connect(&psn, &PSNAccountID::AccountIDResponse, &loop, [&] { success = true; });
+        QObject::connect(&psn, &PSNAccountID::Finished, &loop, &QEventLoop::quit);
+        QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
+        deadline.start(25000);
+        psn.GetPsnAccountId(codes.first());
+        loop.exec();
+        if(!success)
+            return 5;
+
+        const auto &credentials = psn.GetCredentials();
+        const auto access = Ps5LinkEncodeSecret(credentials.accessToken);
+        const auto refresh = Ps5LinkEncodeSecret(credentials.refreshToken);
+        const auto account = Ps5LinkEncodeSecret(credentials.accountId);
+        if(access.isEmpty() || refresh.isEmpty() || account.isEmpty() || active.GetCurrentProfile() != profile)
+            return 1;
+        active.settings.setValue("settings/psn_auth_token", access);
+        active.settings.setValue("settings/psn_refresh_token", refresh);
+        active.settings.setValue("settings/psn_account_id", account);
+        active.SetPsnAuthTokenExpiry(credentials.expiry);
+        active.settings.sync();
+        return active.settings.status() == QSettings::NoError ? 0 : 1;
+    }
+
+    if(operation != "register")
+        return 2;
+    const auto host = request.value("Host").toString().trimmed();
+    const auto pin = request.value("Pin").toString();
+    auto account = request.value("Account").toString().trimmed();
+    if(account.isEmpty())
+        account = active.GetPsnAccountId();
+    const auto accountBytes = QByteArray::fromBase64Encoding(account.toLatin1(), QByteArray::AbortOnBase64DecodingErrors);
+    if(host.isEmpty() || host.size() > 253 || host.contains(QChar::Null) || host.contains(QRegularExpression(R"([/\\\s])"))
+        || !QRegularExpression("^[0-9]{8}$").match(pin).hasMatch() || pin.size() != 8
+        || !accountBytes || accountBytes.decoded.size() != CHIAKI_PSN_ACCOUNT_ID_SIZE)
+        return 2;
+
+    ChiakiRegistInfo info{};
+    const auto hostBytes = host.toUtf8();
+    info.host = hostBytes.constData();
+    info.target = request.value("Ps5").toBool(true) ? CHIAKI_TARGET_PS5_1 : CHIAKI_TARGET_PS4_10;
+    info.pin = pin.toUInt();
+    memcpy(info.psn_account_id, accountBytes.decoded.constData(), CHIAKI_PSN_ACCOUNT_ID_SIZE);
+    ChiakiRegist registration{};
+    ChiakiLog log;
+    chiaki_log_init(&log, 0, nullptr, nullptr);
+
+    struct Result
+    {
+        QEventLoop *loop;
+        std::optional<ChiakiRegisteredHost> host;
+    } result{&loop, {}};
+    const auto callback = [](ChiakiRegistEvent *event, void *user) {
+        auto *result = static_cast<Result *>(user);
+        if(event->type == CHIAKI_REGIST_EVENT_TYPE_FINISHED_SUCCESS)
+            result->host = *event->registered_host;
+        QMetaObject::invokeMethod(result->loop, &QEventLoop::quit, Qt::QueuedConnection);
+    };
+    if(chiaki_regist_start(&registration, &log, &info, callback, &result) != CHIAKI_ERR_SUCCESS)
+        return 6;
+    QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
+    deadline.start(25000);
+    loop.exec();
+    chiaki_regist_stop(&registration);
+    chiaki_regist_fini(&registration);
+#ifdef _WIN32
+    CloseHandle(registration.thread.thread);
+#endif
+    if(!result.host || active.GetCurrentProfile() != profile)
+        return 6;
+
+    active.LoadRegisteredHosts();
+    active.LoadManualHosts();
+    const RegisteredHost registered(*result.host);
+    active.AddRegisteredHost(registered);
+    auto manual = active.GetManualHosts();
+    auto existing = std::find_if(manual.begin(), manual.end(), [&](const ManualHost &entry) {
+        return entry.GetHost() == host;
+    });
+    ManualHost connection = existing != manual.end() ? *existing : ManualHost();
+    connection.SetHost(host);
+    connection.Register(registered);
+    active.SetManualHost(connection);
+    active.SetAutoConnectHost(QByteArray(reinterpret_cast<const char *>(registered.GetServerMAC().GetMAC()), 6));
+    active.settings.sync();
+    return active.settings.status() == QSettings::NoError ? 0 : 1;
+}
+
+#endif
+
+bool Settings::ExportSettings(QString filepath)
 {
 	// append ini if not already added
 	QFileInfo info(filepath);
 	if(info.suffix().isEmpty())
 		filepath += ".ini";
-	QFile file(filepath);
-	if(!file.open(QIODevice::ReadWrite))
-	{
-		qWarning("Settings::ExportSettings: failed to open %s", qPrintable(filepath));
-		return;
-	}
-	file.close();
 	QSettings settings_backup(filepath, QSettings::IniFormat);
+	settings_backup.clear();
 	SaveRegisteredHosts(&settings_backup);
 	SaveHiddenHosts(&settings_backup);
 	SaveManualHosts(&settings_backup);
@@ -316,6 +776,8 @@ void Settings::ExportSettings(QString filepath)
 	// set hw decoder to auto since it's recommended and a platform specific decoder could cause a crash if imported on another platform
 	settings_backup.setValue("settings/hw_decoder", "auto");
 	settings_backup.setValue("settings/this_profile", GetCurrentProfile());
+	settings_backup.sync();
+	return settings_backup.status() == QSettings::NoError;
 }
 
 
@@ -355,7 +817,7 @@ QMap<QString, QString> Settings::GetPlaceboValues()
 	return placeboMap;
 }
 
-void Settings::ImportSettings(QString filepath)
+bool Settings::ImportSettings(QString filepath, const QString &destinationProfile)
 {
 	QSettings settings_backup(filepath, QSettings::IniFormat);
 	const auto isSecretKey = [](const QString &key) {
@@ -400,11 +862,10 @@ void Settings::ImportSettings(QString filepath)
 		for(int i = 0; i < hostCount; ++i)
 		{
 			settings_backup.setArrayIndex(i);
-			const QString prefix = QStringLiteral("registered_hosts/%1/").arg(i + 1);
 			const auto getSecretBytes = [&](const QString &subKey) {
 				const QVariant v = settings_backup.value(subKey);
 				if(Ps5LinkIsSecretProtected(v))
-					return Ps5LinkGetSecret(settings_backup, prefix + subKey, QMetaType::fromType<QByteArray>()).toByteArray();
+					return Ps5LinkGetSecret(settings_backup, subKey, QMetaType::fromType<QByteArray>()).toByteArray();
 				return v.toByteArray();
 			};
 			if(getSecretBytes(QStringLiteral("rp_regist_key")).isEmpty()
@@ -422,27 +883,40 @@ void Settings::ImportSettings(QString filepath)
 		}
 		return true;
 	};
-	if(!canImportKeys())
-		return;
+	if(!canImportKeys() || settings_backup.status() != QSettings::NoError)
+		return false;
 
+	QMap<QString, QVariant> values;
+	for(const QString &key : settings_backup.allKeys())
+	{
+		const QVariant val = settings_backup.value(key);
+#ifdef PS5LINK_BUILD
+		if(isSecretKey(key) && !val.toByteArray().isEmpty() && !Ps5LinkIsSecretProtected(val))
+		{
+			// Stage conversion in memory before touching the destination profile.
+			const auto encoded = Ps5LinkEncodeSecret(val);
+			if(encoded.isEmpty())
+				return false;
+			values.insert(key, encoded);
+		}
+		else
+#endif
+			values.insert(key, val);
+	}
 	const auto copyImportedKeys = [&](QSettings &dst) {
 		dst.clear();
-		const QStringList keys = settings_backup.allKeys();
-		for(const QString &key : keys)
-		{
-			const QVariant val = settings_backup.value(key);
-			if(isSecretKey(key) && !Ps5LinkIsSecretProtected(val))
-				Ps5LinkSetSecret(dst, key, val);
-			else
-				dst.setValue(key, val);
-		}
+		for(auto it = values.constBegin(); it != values.constEnd(); ++it)
+			dst.setValue(it.key(), it.value());
 		dst.sync();
+		return dst.status() == QSettings::NoError;
 	};
 
-	QString profile = settings_backup.value("settings/this_profile").toString();
+	QString profile = destinationProfile.isEmpty() ? settings_backup.value("settings/this_profile").toString() : destinationProfile;
+
 	if(profile.isEmpty())
 	{
-		copyImportedKeys(settings);
+		if(!copyImportedKeys(settings))
+			return false;
 		LoadRegisteredHosts(&settings);
 		LoadHiddenHosts(&settings);
 		LoadManualHosts(&settings);
@@ -454,7 +928,8 @@ void Settings::ImportSettings(QString filepath)
 	else
 	{
 		QSettings profile_settings(QSettings::defaultFormat(), QSettings::UserScope, QCoreApplication::organizationName(), QStringLiteral("%1-%2").arg(QCoreApplication::applicationName(), profile));
-		copyImportedKeys(profile_settings);
+		if(!copyImportedKeys(profile_settings))
+			return false;
 		LoadRegisteredHosts(&profile_settings);
 		LoadHiddenHosts(&profile_settings);
 		LoadManualHosts(&profile_settings);
@@ -463,6 +938,8 @@ void Settings::ImportSettings(QString filepath)
 		emit RegisteredHostsUpdated();
 		SetCurrentProfile(std::move(profile));
 	}
+	default_settings.sync();
+	return default_settings.status() == QSettings::NoError;
 }
 
 void Settings::ImportPlaceboSettings(QString filepath)
@@ -2645,6 +3122,7 @@ void Settings::ResetStreamSettings()
 	const QStringList keys = {
 		"settings/wifi_streaming_mode", "settings/prevent_display_sleep", "settings/performance_mode",
 		"settings/controller_polling_ms", "settings/gamepad_quit_hotkey",
+		"settings/video_reorder_window_ms", "settings/mute_pc_audio_with_dualsense_headphones",
 		"settings/enable_rumble", "settings/enable_adaptive_triggers", "settings/enable_gyro_reset",
 		"settings/lightbar_mode", "settings/theme_mode", "settings/volume_controls_system",
 		"settings/hide_on_screen_controls", "settings/show_mic_button",

@@ -11,12 +11,16 @@
 #include <setupapi.h>
 
 #include <opus/opus.h>
+#if CHIAKI_GUI_ENABLE_SPEEX
+#include <speex/speex_resampler.h>
+#endif
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -242,36 +246,49 @@ private:
 // the Bluetooth DualSense via HidHide.
 bool sendDs5LinkBridgeCommand(const char *command, std::string *outResponse = nullptr)
 {
-	HANDLE pipe = CreateFileA(
-		kDs5LinkControlPipe,
-		GENERIC_READ | GENERIC_WRITE,
-		0,
-		nullptr,
-		OPEN_EXISTING,
-		FILE_ATTRIBUTE_NORMAL,
-		nullptr);
+	HANDLE pipe = CreateFileA(kDs5LinkControlPipe, GENERIC_READ | GENERIC_WRITE,
+		0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
 	if(pipe == INVALID_HANDLE_VALUE)
 		return false;
 
-	std::string req = std::string("{\"protocolVersion\":1,\"id\":\"ps5link\",\"command\":\"") + command + "\"}\n";
-	DWORD written = 0;
-	const BOOL writeOk = WriteFile(pipe, req.data(), static_cast<DWORD>(req.size()), &written, nullptr);
-	if(!writeOk || written != req.size())
+	OVERLAPPED io{};
+	io.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+	if(!io.hEvent)
 	{
 		CloseHandle(pipe);
 		return false;
 	}
+	const auto finishIo = [&](BOOL completed, DWORD &bytes) {
+		if(completed)
+			return true;
+		if(GetLastError() != ERROR_IO_PENDING)
+			return false;
+		if(WaitForSingleObject(io.hEvent, 250) == WAIT_OBJECT_0)
+			return GetOverlappedResult(pipe, &io, &bytes, FALSE) != FALSE;
+		CancelIoEx(pipe, &io);
+		GetOverlappedResult(pipe, &io, &bytes, TRUE);
+		return false;
+	};
 
-	char buf[2048];
-	DWORD readBytes = 0;
-	if(ReadFile(pipe, buf, sizeof(buf) - 1, &readBytes, nullptr) && readBytes > 0)
+	const std::string req = std::string("{\"protocolVersion\":1,\"id\":\"ps5link\",\"command\":\"") + command + "\"}\n";
+	DWORD written = 0;
+	bool ok = finishIo(WriteFile(pipe, req.data(), static_cast<DWORD>(req.size()), &written, &io), written)
+		&& written == req.size();
+	if(ok)
 	{
-		buf[readBytes] = '\0';
-		if(outResponse)
-			*outResponse = buf;
+		char buf[2048];
+		DWORD readBytes = 0;
+		const HANDLE event = io.hEvent;
+		io = {};
+		io.hEvent = event;
+		ResetEvent(event);
+		ok = finishIo(ReadFile(pipe, buf, sizeof(buf), &readBytes, &io), readBytes) && readBytes > 0;
+		if(ok && outResponse)
+			outResponse->assign(buf, readBytes);
 	}
+	CloseHandle(io.hEvent);
 	CloseHandle(pipe);
-	return true;
+	return ok;
 }
 
 struct ImuCalibration
@@ -360,7 +377,12 @@ struct Ds5BtManager::Impl
 	mutable std::mutex mutex;
 
 	// Discovery & coexistence state
-	std::chrono::steady_clock::time_point lastPollTime{};
+	std::mutex discoveryMutex;
+	std::condition_variable discoveryWake;
+	std::thread discoveryThread;
+	bool discoveryStop = false;
+	bool discoveryRequested = false;
+	bool initialDiscoveryDone = false;
 	bool pausedExternalBridge = false;
 	std::atomic<bool> usbDualSensePresent{false};
 
@@ -391,6 +413,7 @@ struct Ds5BtManager::Impl
 	std::atomic<bool> micMuted{true};
 	std::atomic<bool> micStreamActive{false};
 	std::atomic<bool> speakerAudioEnabled{false};
+	std::atomic<bool> combinedAudioReportSupported{false};
 
 	// Input & IMU state
 	ImuCalibration imuCal;
@@ -413,13 +436,16 @@ struct Ds5BtManager::Impl
 
 	// Speaker / 3.5mm Headphone Opus encoder (48 kHz stereo -> 200-byte Opus)
 	OpusEncoder *speakerEncoder = nullptr;
+#if CHIAKI_GUI_ENABLE_SPEEX
+	SpeexResamplerState *speakerResampler = nullptr;
+#endif
 	std::mutex audioHapticsMutex;
 	std::vector<int16_t> speakerPcmFifo; // Interleaved L/R 48 kHz samples
 	std::deque<std::array<uint8_t, kSpeakerOpusSize>> pendingSpeakerPackets;
 	std::vector<int8_t> hapticsPcmFifo;  // Interleaved L/R 3 kHz 8-bit signed samples
 	std::deque<std::array<uint8_t, kHapticsBlockSize>> pendingHapticsBlocks;
 	std::chrono::steady_clock::time_point lastHapticsPushTime{};
-	bool voiceCoilHapticsActive = false;
+	std::atomic<bool> voiceCoilHapticsActive{false};
 	int trailingZeroHapticsPackets = 0;
 
 	// DualSense 63-byte state & output packet sequencing
@@ -461,11 +487,20 @@ struct Ds5BtManager::Impl
 			opus_encoder_ctl(speakerEncoder, OPUS_SET_COMPLEXITY(0));
 			opus_encoder_ctl(speakerEncoder, OPUS_SET_EXPERT_FRAME_DURATION(OPUS_FRAMESIZE_10_MS));
 		}
+#if CHIAKI_GUI_ENABLE_SPEEX
+		// The controller consumes one 480-sample Opus packet per 512 source samples.
+		speakerResampler = speex_resampler_init(2, kOpusSampleRate,
+			kOpusSampleRate * kOpusFrameSamples / kPcmWindowFrames, 3, nullptr);
+#endif
 	}
 
 	~Impl()
 	{
 		shutdown();
+#if CHIAKI_GUI_ENABLE_SPEEX
+		if(speakerResampler)
+			speex_resampler_destroy(speakerResampler);
+#endif
 		if(micDecoder)
 		{
 			opus_decoder_destroy(micDecoder);
@@ -480,6 +515,49 @@ struct Ds5BtManager::Impl
 		{
 			CloseHandle(stopEvent);
 			stopEvent = nullptr;
+		}
+	}
+
+	void clearSpeakerAudioLocked()
+	{
+		speakerPcmFifo.clear();
+		pendingSpeakerPackets.clear();
+#if CHIAKI_GUI_ENABLE_SPEEX
+		if(speakerResampler)
+			speex_resampler_reset_mem(speakerResampler);
+#endif
+		if(speakerEncoder)
+			opus_encoder_ctl(speakerEncoder, OPUS_RESET_STATE);
+	}
+
+	void resampleSpeakerWindow(const int16_t *input, int16_t *output)
+	{
+#if CHIAKI_GUI_ENABLE_SPEEX
+		if(speakerResampler)
+		{
+			spx_uint32_t inputFrames = kPcmWindowFrames;
+			spx_uint32_t outputFrames = kOpusFrameSamples;
+			if(speex_resampler_process_interleaved_int(speakerResampler, input, &inputFrames, output, &outputFrames) == RESAMPLER_ERR_SUCCESS
+				&& inputFrames == kPcmWindowFrames && outputFrames == kOpusFrameSamples)
+				return;
+			speex_resampler_reset_mem(speakerResampler);
+		}
+#endif
+		// Average each 16/15-sample interval for builds without SpeexDSP.
+		static_assert(kPcmWindowFrames * 15 == kOpusFrameSamples * 16);
+		for(int f = 0; f < kOpusFrameSamples; ++f)
+		{
+			const int start = f * 16;
+			const int end = start + 16;
+			int left = 0, right = 0;
+			for(int i = start / 15; i <= (end - 1) / 15; ++i)
+			{
+				const int weight = std::min(end, (i + 1) * 15) - std::max(start, i * 15);
+				left += input[i * 2] * weight;
+				right += input[i * 2 + 1] * weight;
+			}
+			output[f * 2] = static_cast<int16_t>(left / 16);
+			output[f * 2 + 1] = static_cast<int16_t>(right / 16);
 		}
 	}
 
@@ -502,7 +580,8 @@ struct Ds5BtManager::Impl
 	{
 		const bool hp = headphonesPlugged.load(std::memory_order_relaxed);
 		const bool hsMic = headsetMicPlugged.load(std::memory_order_relaxed);
-		const bool spkActive = hp || speakerAudioEnabled.load(std::memory_order_relaxed);
+		const bool spkActive = combinedAudioReportSupported.load(std::memory_order_relaxed)
+			&& (hp || speakerAudioEnabled.load(std::memory_order_relaxed));
 		const bool micAct = desiredMicActive && !desiredMicMuted;
 
 		dsState[0] |= 0xF0; // allow headphone/speaker/mic volume + audio_control
@@ -686,18 +765,17 @@ struct Ds5BtManager::Impl
 		return packet;
 	}
 
-	bool writeOutputReportSync(const uint8_t *report, size_t reportSize)
+	bool writeOutputReportSync(const uint8_t *report, size_t reportSize, std::vector<uint8_t> &writeBuf, HANDLE writeEvent)
 	{
 		if(outputHandle == INVALID_HANDLE_VALUE || outputReportLength < reportSize)
 			return false;
 
-		std::vector<uint8_t> writeBuf(outputReportLength, 0);
+		std::fill(writeBuf.begin(), writeBuf.end(), 0);
 		std::memcpy(writeBuf.data(), report, reportSize);
 
 		OVERLAPPED ov{};
-		ov.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
-		if(!ov.hEvent)
-			return false;
+		ov.hEvent = writeEvent;
+		ResetEvent(writeEvent);
 
 		DWORD written = 0;
 		BOOL ok = WriteFile(outputHandle, writeBuf.data(), static_cast<DWORD>(writeBuf.size()), &written, &ov);
@@ -716,17 +794,14 @@ struct Ds5BtManager::Impl
 				{
 					CancelIoEx(outputHandle, &ov);
 					GetOverlappedResult(outputHandle, &ov, &written, TRUE);
-					CloseHandle(ov.hEvent);
 					return false;
 				}
 			}
 			else
 			{
-				CloseHandle(ov.hEvent);
 				return false;
 			}
 		}
-		CloseHandle(ov.hEvent);
 		return ok != FALSE;
 	}
 
@@ -751,7 +826,11 @@ struct Ds5BtManager::Impl
 		OVERLAPPED ov{};
 		ov.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
 		if(!ov.hEvent)
+		{
+			connected.store(false, std::memory_order_release);
+			requestDiscovery();
 			return;
+		}
 
 		std::vector<uint8_t> raw(kBtInputReportSize, 0);
 		while(!workerStop.load(std::memory_order_relaxed))
@@ -789,6 +868,7 @@ struct Ds5BtManager::Impl
 
 		CloseHandle(ov.hEvent);
 		connected.store(false, std::memory_order_release);
+		requestDiscovery();
 	}
 
 	void handleBluetoothInputReport31(const uint8_t *raw, size_t len)
@@ -827,13 +907,9 @@ struct Ds5BtManager::Impl
 					stereoPcm[i * 2] = monoPcm[i];
 					stereoPcm[i * 2 + 1] = monoPcm[i];
 				}
-				std::function<void(const int16_t *, const int16_t *, size_t)> cb;
-				{
-					std::lock_guard<std::mutex> lock(micCallbackMutex);
-					cb = micAudioCallback;
-				}
-				if(cb)
-					cb(monoPcm.data(), stereoPcm.data(), static_cast<size_t>(kOpusFrameSamples));
+				std::lock_guard<std::mutex> lock(micCallbackMutex);
+				if(micAudioCallback)
+					micAudioCallback(monoPcm.data(), stereoPcm.data(), static_cast<size_t>(kOpusFrameSamples));
 			}
 			return;
 		}
@@ -860,6 +936,11 @@ struct Ds5BtManager::Impl
 		const bool hsMic = (u[54] & 0x02u) != 0;
 		const bool prevHp = headphonesPlugged.exchange(hp, std::memory_order_relaxed);
 		const bool prevHsMic = headsetMicPlugged.exchange(hsMic, std::memory_order_relaxed);
+		if(hp != prevHp)
+		{
+			std::lock_guard<std::mutex> lock(audioHapticsMutex);
+			clearSpeakerAudioLocked();
+		}
 		if(hp != prevHp || hsMic != prevHsMic)
 		{
 			std::lock_guard<std::mutex> lock(outputStateMutex);
@@ -982,13 +1063,6 @@ struct Ds5BtManager::Impl
 				&accelZero,
 				false,
 				motionTimestampUs);
-			chiaki_orientation_tracker_update(
-				&orientationTracker,
-				gyroX, gyroY, gyroZ,
-				accelX, accelY, accelZ,
-				&accelZero,
-				true,
-				motionTimestampUs);
 			chiaki_orientation_tracker_apply_to_controller_state(&orientationTracker, &controllerState);
 			inputSeq.fetch_add(1, std::memory_order_release);
 		}
@@ -997,6 +1071,17 @@ struct Ds5BtManager::Impl
 	void outputThreadLoop()
 	{
 		AudioThreadPriorityGuard priorityGuard;
+		std::vector<uint8_t> writeBuffer(outputReportLength);
+		const HANDLE writeEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+		if(!writeEvent)
+		{
+			connected.store(false, std::memory_order_release);
+			requestDiscovery();
+			return;
+		}
+		const auto writeReport = [&](const auto &report) {
+			return writeOutputReportSync(report.data(), report.size(), writeBuffer, writeEvent);
+		};
 
 		HANDLE timer = CreateWaitableTimerExA(
 			nullptr,
@@ -1023,8 +1108,8 @@ struct Ds5BtManager::Impl
 				resetState[41] = 0x02; // fade out default blue flash
 				reset31 = buildBtStateReport31Locked(resetState);
 			}
-			writeOutputReportSync(init32.data(), init32.size());
-			writeOutputReportSync(reset31.data(), reset31.size());
+			writeReport(init32);
+			writeReport(reset31);
 			std::this_thread::sleep_for(std::chrono::milliseconds(50));
 			{
 				std::lock_guard<std::mutex> lock(outputStateMutex);
@@ -1033,11 +1118,13 @@ struct Ds5BtManager::Impl
 				color31 = buildBtStateReport31Locked(dsState);
 				stateReportDirty = false;
 			}
-			writeOutputReportSync(color31.data(), color31.size());
+			writeReport(color31);
 		}
 
 		constexpr auto kPacedInterval = std::chrono::microseconds(10667); // 32 frames @ 3000 Hz = 10.667 ms
 		auto nextPacedDeadline = std::chrono::steady_clock::now() + kPacedInterval;
+		int lowRumblePhase = 0, highRumblePhase = 0;
+		bool syntheticRumbleActive = false;
 
 		while(!workerStop.load(std::memory_order_relaxed) && connected.load(std::memory_order_acquire))
 		{
@@ -1062,8 +1149,8 @@ struct Ds5BtManager::Impl
 			}
 			if(doMicToggle)
 			{
-				writeOutputReportSync(micState31.data(), micState31.size());
-				writeOutputReportSync(micCmd32.data(), micCmd32.size());
+				writeReport(micState31);
+				writeReport(micCmd32);
 			}
 
 			// 2. Check if 10.67 ms paced slot is due for Report 0x36 (speaker + haptics) or Report 0x32 (wave haptics)
@@ -1075,7 +1162,8 @@ struct Ds5BtManager::Impl
 					nextPacedDeadline += kPacedInterval;
 
 				const bool hp = headphonesPlugged.load(std::memory_order_relaxed);
-				const bool spkMode = hp || speakerAudioEnabled.load(std::memory_order_relaxed);
+				const bool spkMode = combinedAudioReportSupported.load(std::memory_order_relaxed)
+					&& (hp || speakerAudioEnabled.load(std::memory_order_relaxed));
 
 				bool hasSpeakerPacket = false;
 				std::array<uint8_t, kSpeakerOpusSize> speakerPacket{};
@@ -1107,6 +1195,28 @@ struct Ds5BtManager::Impl
 					}
 				}
 
+				if(spkMode && !hasHapticsBlock)
+				{
+					std::lock_guard<std::mutex> lock(outputStateMutex);
+					const bool rumbling = lastRumbleLeft || lastRumbleRight;
+					// Preserve native haptics priority and send one silent block on rumble release.
+					hasHapticsBlock = rumbling || syntheticRumbleActive;
+					syntheticRumbleActive = rumbling;
+					if(rumbling)
+					{
+						const auto wave = [](int &phase, int period, uint8_t amplitude) {
+							const int value = (std::min(phase, period - phase) * 4 - period) * amplitude / (period * 2);
+							phase = (phase + 1) % period;
+							return static_cast<uint8_t>(value);
+						};
+						for(size_t frame = 0; frame < hapticsBlock.size(); frame += 2)
+						{
+							hapticsBlock[frame] = wave(lowRumblePhase, 40, lastRumbleLeft);
+							hapticsBlock[frame + 1] = wave(highRumblePhase, 20, lastRumbleRight);
+						}
+					}
+				}
+
 				if(spkMode && hasSpeakerPacket)
 				{
 					std::array<uint8_t, kBtHapticsReportSize> pkt36{};
@@ -1117,7 +1227,7 @@ struct Ds5BtManager::Impl
 						pkt36 = buildBtCombinedReport36Locked(hapticsBlock, speakerPacket, dsState, micOn, hp);
 						stateReportDirty = false;
 					}
-					writeOutputReportSync(pkt36.data(), pkt36.size());
+					writeReport(pkt36);
 				}
 				else if(hasHapticsBlock)
 				{
@@ -1137,8 +1247,8 @@ struct Ds5BtManager::Impl
 						wave32 = buildBtWaveHapticsReport32Locked(hapticsBlock, micOn);
 					}
 					if(unmuteState31)
-						writeOutputReportSync(unmuteState31->data(), unmuteState31->size());
-					writeOutputReportSync(wave32.data(), wave32.size());
+						writeReport(*unmuteState31);
+					writeReport(wave32);
 				}
 			}
 
@@ -1154,7 +1264,7 @@ struct Ds5BtManager::Impl
 				}
 			}
 			if(pendingState31)
-				writeOutputReportSync(pendingState31->data(), pendingState31->size());
+				writeReport(*pendingState31);
 
 			// Sleep until next 10.67 ms boundary or up to 2 ms for responsive trigger/LED updates
 			const auto afterWork = std::chrono::steady_clock::now();
@@ -1179,6 +1289,7 @@ struct Ds5BtManager::Impl
 
 		if(timer)
 			CloseHandle(timer);
+		CloseHandle(writeEvent);
 	}
 
 	void closeDeviceLocked()
@@ -1213,9 +1324,13 @@ struct Ds5BtManager::Impl
 		}
 
 		connected.store(false, std::memory_order_release);
+		combinedAudioReportSupported.store(false, std::memory_order_relaxed);
 		pid.store(0, std::memory_order_relaxed);
 		devicePath.clear();
-		btAddress.clear();
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			btAddress.clear();
+		}
 		batteryPct.store(-1, std::memory_order_relaxed);
 		charging.store(false, std::memory_order_relaxed);
 		fullCharge.store(false, std::memory_order_relaxed);
@@ -1227,16 +1342,59 @@ struct Ds5BtManager::Impl
 		prevMicButtonDown = false;
 	}
 
-	void pollDevices()
+	static DWORD CALLBACK onHidChange(HCMNOTIFICATION, PVOID context, CM_NOTIFY_ACTION, PCM_NOTIFY_EVENT_DATA, DWORD)
 	{
-		const auto now = std::chrono::steady_clock::now();
-		if(lastPollTime != std::chrono::steady_clock::time_point{}
-			&& (now - lastPollTime) < std::chrono::milliseconds(900))
-		{
-			return;
-		}
-		lastPollTime = now;
+		static_cast<Impl *>(context)->requestDiscovery();
+		return ERROR_SUCCESS;
+	}
 
+	void requestDiscovery()
+	{
+		std::lock_guard<std::mutex> lock(discoveryMutex);
+		discoveryRequested = true;
+		discoveryWake.notify_all();
+	}
+
+	void startDiscovery(bool waitForInitialScan)
+	{
+		std::unique_lock<std::mutex> lock(discoveryMutex);
+		if(!discoveryThread.joinable() && !discoveryStop)
+			discoveryThread = std::thread([this] { discoveryLoop(); });
+		if(waitForInitialScan)
+			discoveryWake.wait_for(lock, std::chrono::seconds(3), [this] { return initialDiscoveryDone || discoveryStop; });
+	}
+
+	void discoveryLoop()
+	{
+		CM_NOTIFY_FILTER filter{};
+		filter.cbSize = sizeof(filter);
+		filter.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE;
+		HidD_GetHidGuid(&filter.u.DeviceInterface.ClassGuid);
+		HCMNOTIFICATION notification{};
+		const bool subscribed = CM_Register_Notification(&filter, this, onHidChange, &notification) == CR_SUCCESS;
+
+		std::unique_lock<std::mutex> lock(discoveryMutex);
+		while(!discoveryStop)
+		{
+			discoveryRequested = false;
+			lock.unlock();
+			scanDevices();
+			lock.lock();
+			initialDiscoveryDone = true;
+			discoveryWake.notify_all();
+			const auto pending = [this] { return discoveryRequested || discoveryStop; };
+			if(subscribed && connected.load(std::memory_order_acquire))
+				discoveryWake.wait(lock, pending);
+			else
+				discoveryWake.wait_for(lock, std::chrono::milliseconds(900), pending);
+		}
+		lock.unlock();
+		if(subscribed)
+			CM_Unregister_Notification(notification);
+	}
+
+	void scanDevices()
+	{
 		// If worker thread exited due to Bluetooth disconnect, clean up handles
 		if(!connected.load(std::memory_order_acquire) && (inputHandle != INVALID_HANDLE_VALUE || inputThread.joinable()))
 		{
@@ -1404,13 +1562,17 @@ struct Ds5BtManager::Impl
 		outputHandle = outH;
 		featureHandle = featH;
 		outputReportLength = foundOutLen;
+		combinedAudioReportSupported.store(foundOutLen >= kBtHapticsReportSize, std::memory_order_relaxed);
 		featureReportLength = foundFeatLen;
 		devicePath = foundBtPath;
-		btAddress = foundBtAddress;
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			btAddress = foundBtAddress;
+			deviceName = (foundBtPid == kDualSenseEdgeProductId)
+				? "DualSense Edge Wireless Controller (Bluetooth)"
+				: "DualSense Wireless Controller (Bluetooth)";
+		}
 		pid.store(foundBtPid, std::memory_order_relaxed);
-		deviceName = (foundBtPid == kDualSenseEdgeProductId)
-			? "DualSense Edge Wireless Controller (Bluetooth)"
-			: "DualSense Wireless Controller (Bluetooth)";
 
 		readFeature05Calibration();
 
@@ -1420,8 +1582,7 @@ struct Ds5BtManager::Impl
 		}
 		{
 			std::lock_guard<std::mutex> lock(audioHapticsMutex);
-			speakerPcmFifo.clear();
-			pendingSpeakerPackets.clear();
+			clearSpeakerAudioLocked();
 			hapticsPcmFifo.clear();
 			pendingHapticsBlocks.clear();
 			voiceCoilHapticsActive = false;
@@ -1443,6 +1604,15 @@ struct Ds5BtManager::Impl
 
 	void shutdown()
 	{
+		{
+			std::lock_guard<std::mutex> lock(discoveryMutex);
+			if(discoveryStop)
+				return;
+			discoveryStop = true;
+			discoveryWake.notify_all();
+		}
+		if(discoveryThread.joinable())
+			discoveryThread.join();
 		closeDeviceLocked();
 		if(pausedExternalBridge)
 		{
@@ -1469,9 +1639,9 @@ Ds5BtManager::~Ds5BtManager()
 	delete impl_;
 }
 
-void Ds5BtManager::pollDevices()
+void Ds5BtManager::startDiscovery(bool waitForInitialScan)
 {
-	impl_->pollDevices();
+	impl_->startDiscovery(waitForInitialScan);
 }
 
 void Ds5BtManager::shutdown()
@@ -1548,8 +1718,7 @@ void Ds5BtManager::setSpeakerAudioEnabled(bool enabled)
 	{
 		{
 			std::lock_guard<std::mutex> lock(impl_->audioHapticsMutex);
-			impl_->speakerPcmFifo.clear();
-			impl_->pendingSpeakerPackets.clear();
+			impl_->clearSpeakerAudioLocked();
 		}
 		std::lock_guard<std::mutex> lock(impl_->outputStateMutex);
 		impl_->applyAudioRoutingFlagsLocked();
@@ -1564,7 +1733,8 @@ bool Ds5BtManager::isSpeakerAudioEnabled() const
 
 bool Ds5BtManager::isSpeakerAudioActive() const
 {
-	return impl_->connected.load(std::memory_order_relaxed)
+	return impl_->speakerEncoder && impl_->connected.load(std::memory_order_acquire)
+		&& impl_->combinedAudioReportSupported.load(std::memory_order_relaxed)
 		&& (impl_->headphonesPlugged.load(std::memory_order_relaxed)
 			|| impl_->speakerAudioEnabled.load(std::memory_order_relaxed));
 }
@@ -1778,13 +1948,7 @@ void Ds5BtManager::pushSpeakerAudio48kHz(const int16_t *stereoSamples, size_t st
 	std::array<int16_t, kOpusFrameSamples * 2> resampled{};
 	while(impl_->speakerPcmFifo.size() >= kWindowSamples)
 	{
-		const int16_t *src = impl_->speakerPcmFifo.data();
-		for(size_t f = 0; f < static_cast<size_t>(kOpusFrameSamples); ++f)
-		{
-			const size_t srcFrame = (f * kPcmWindowFrames) / static_cast<size_t>(kOpusFrameSamples);
-			resampled[f * 2] = src[srcFrame * 2];
-			resampled[f * 2 + 1] = src[srcFrame * 2 + 1];
-		}
+		impl_->resampleSpeakerWindow(impl_->speakerPcmFifo.data(), resampled.data());
 		impl_->speakerPcmFifo.erase(
 			impl_->speakerPcmFifo.begin(),
 			impl_->speakerPcmFifo.begin() + static_cast<std::ptrdiff_t>(kWindowSamples));

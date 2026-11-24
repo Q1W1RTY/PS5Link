@@ -487,7 +487,10 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	chiaki_connect_info.enable_keyboard = false;
 	chiaki_connect_info.enable_idr_on_fec_failure = connect_info.enable_idr_on_fec_failure;
 #ifdef PS5LINK_BUILD
-    chiaki_connect_info.video_reorder_window_ms = QCoreApplication::instance()->property("ps5linkReorderWindow").toUInt();
+    const auto reorder_override = QCoreApplication::instance()->property("ps5linkReorderWindow");
+    chiaki_connect_info.bypass_video_packet_reorder = true;
+    chiaki_connect_info.video_reorder_window_ms = reorder_override.isValid() ? reorder_override.toUInt()
+        : connect_info.settings ? connect_info.settings->GetVideoReorderWindowMs() : 0;
     chiaki_connect_info.always_request_idr_on_loss = connect_info.settings ? connect_info.settings->GetAlwaysRequestIdr() : false;
 #endif
 	chiaki_connect_info.enable_dualsense = connect_info.enable_dualsense;
@@ -778,6 +781,9 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 		boostOpts.preventSleep = connect_info.settings->GetPreventDisplaySleep();
 		boostOpts.turboMode = connect_info.settings->GetPerformanceMode() != 0;
 		enable_rumble.storeRelaxed(connect_info.settings->GetEnableRumble());
+#if defined(_WIN32)
+		mute_pc_audio_with_dualsense_headphones = connect_info.settings->GetMutePcAudioWithDualSenseHeadphones();
+#endif
 		enable_adaptive_triggers.storeRelaxed(connect_info.settings->GetEnableAdaptiveTriggers());
 		enable_gyro_reset.storeRelaxed(connect_info.settings->GetEnableGyroReset());
 		lightbar_mode.storeRelaxed(connect_info.settings->GetLightbarMode());
@@ -2198,9 +2204,25 @@ void StreamSession::StopSdeckHaptics()
 void StreamSession::PushAudioFrame(int16_t *og_buf, size_t samples_count)
 {
 #if defined(PS5LINK_BUILD) && defined(_WIN32)
-	if(audio_volume > 0 && Ds5BtManager::instance().isSpeakerAudioActive())
+	auto &ds5 = Ds5BtManager::instance();
+	const bool bt_audio_active = ds5.isSpeakerAudioActive();
+	if(audio_volume > 0 && bt_audio_active)
+		ds5.pushSpeakerAudio48kHz(og_buf, samples_count, audio_volume, SDL_MIX_MAXVOLUME);
+	if(audio_out && mute_pc_audio_with_dualsense_headphones)
 	{
-		Ds5BtManager::instance().pushSpeakerAudio48kHz(og_buf, samples_count, audio_volume, SDL_MIX_MAXVOLUME);
+		const bool suppress_pc_audio = bt_audio_active && ds5.isHeadphonesPlugged();
+		QMutexLocker lock(&audio_out_ring_mutex);
+		if(suppress_pc_audio != pc_audio_suppressed)
+		{
+			pc_audio_suppressed = suppress_pc_audio;
+			SDL_ClearQueuedAudio(audio_out);
+			audio_out_ring_read_pos = 0;
+			audio_out_ring_write_pos = 0;
+			audio_out_ring_fill = 0;
+			audio_out_overflow_logged = false;
+		}
+		if(suppress_pc_audio)
+			return;
 	}
 #endif
 	if(!audio_out || !audio_volume)
@@ -2335,13 +2357,13 @@ void StreamSession::DrainAudioOutRingBuffer()
 			audio_chunk = QByteArray(audio_out_ring_buf.constData() + audio_out_ring_read_pos, (int)chunk_size);
 			audio_out_ring_read_pos = (audio_out_ring_read_pos + chunk_size) % capacity;
 			audio_out_ring_fill -= chunk_size;
-		}
 
-		if(SDL_QueueAudio(audio_out, audio_chunk.constData(), (Uint32)audio_chunk.size()) < 0)
-		{
-			CHIAKI_LOGE(log.GetChiakiLog(), "Failed to queue audio frame: %s", SDL_GetError());
-			SDL_ClearQueuedAudio(audio_out);
-			break;
+			if(SDL_QueueAudio(audio_out, audio_chunk.constData(), (Uint32)audio_chunk.size()) < 0)
+			{
+				CHIAKI_LOGE(log.GetChiakiLog(), "Failed to queue audio frame: %s", SDL_GetError());
+				SDL_ClearQueuedAudio(audio_out);
+				break;
+			}
 		}
 	}
 }

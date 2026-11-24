@@ -103,6 +103,7 @@ typedef struct chiaki_takion_event_t
 } ChiakiTakionEvent;
 
 typedef void (*ChiakiTakionCallback)(ChiakiTakionEvent *event, void *user);
+typedef uint64_t (*ChiakiTakionPollTimeout)(void *user, uint64_t timeout_ms);
 
 typedef struct chiaki_takion_connect_info_t
 {
@@ -111,6 +112,7 @@ typedef struct chiaki_takion_connect_info_t
 	size_t sa_len;
 	bool ip_dontfrag;
 	ChiakiTakionCallback cb;
+	ChiakiTakionPollTimeout poll_timeout;
 	void *cb_user;
 	ChiakiDisableAudioVideo disable_audio_video;
 	bool enable_crypt;
@@ -168,6 +170,7 @@ typedef struct chiaki_takion_t
 	ChiakiMutex send_buffer_active_mutex;
 
 	ChiakiTakionCallback cb;
+	ChiakiTakionPollTimeout poll_timeout;
 	void *cb_user;
 	chiaki_socket_t sock;
 	ChiakiThread thread;

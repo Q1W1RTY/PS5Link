@@ -43,7 +43,8 @@ typedef struct chiaki_video_receiver_t
 	ChiakiFrameProcessor next_frame_processor; // 2nd assembly slot for cross-frame UDP reordering
 	int32_t next_frame_index; // -1 if empty, else (frame_index_cur + 1)
 	int next_frame_profile; // adaptive_stream_index for next_frame_index, or -1
-	bool next_frame_saw_last_unit;
+	uint64_t next_frame_deadline_ms;
+	bool next_frame_waited;
 	ChiakiPacketStats *packet_stats;
 
 	int32_t frames_lost;
@@ -56,6 +57,7 @@ typedef struct chiaki_video_receiver_t
 	ChiakiMutex frames_lost_mutex;
 	ChiakiVideoRecoveryStats recovery_stats;
 	uint64_t reorder_deadline_ms;
+	bool reorder_waited;
 	bool frame_follows_gap;
 } ChiakiVideoReceiver;
 
@@ -71,6 +73,7 @@ CHIAKI_EXPORT void chiaki_video_receiver_fini(ChiakiVideoReceiver *video_receive
  */
 CHIAKI_EXPORT void chiaki_video_receiver_stream_info(ChiakiVideoReceiver *video_receiver, ChiakiVideoProfile *profiles, size_t profiles_count);
 
+CHIAKI_EXPORT uint64_t chiaki_video_receiver_poll_timeout(ChiakiVideoReceiver *video_receiver, uint64_t timeout_ms);
 CHIAKI_EXPORT void chiaki_video_receiver_av_packet(ChiakiVideoReceiver *video_receiver, ChiakiTakionAVPacket *packet);
 CHIAKI_EXPORT void chiaki_video_receiver_set_waiting_for_idr(ChiakiVideoReceiver *video_receiver, bool waiting_for_idr);
 CHIAKI_EXPORT bool chiaki_video_receiver_get_waiting_for_idr(ChiakiVideoReceiver *video_receiver);

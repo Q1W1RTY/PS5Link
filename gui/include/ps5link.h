@@ -14,6 +14,7 @@ struct Ps5LinkBoostOptions
 class QGuiApplication;
 bool Ps5LinkOnline();
 bool Ps5LinkIsSecretProtected(const QVariant &value);
+QByteArray Ps5LinkEncodeSecret(const QVariant &value);
 bool Ps5LinkSetSecret(QSettings &settings, const QString &key, const QVariant &value);
 QVariant Ps5LinkGetSecret(const QSettings &settings, const QString &key, QMetaType type);
 int Ps5LinkImport(const QString &sourceName);

@@ -265,6 +265,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_session_init(ChiakiSession *session, Chiaki
 	session->connect_info.enable_dualsense = connect_info->enable_dualsense;
 	session->connect_info.enable_idr_on_fec_failure = connect_info->enable_idr_on_fec_failure;
 	session->connect_info.always_request_idr_on_loss = connect_info->always_request_idr_on_loss;
+	session->connect_info.bypass_video_packet_reorder = connect_info->bypass_video_packet_reorder;
 	session->connect_info.video_reorder_window_ms = connect_info->video_reorder_window_ms;
 
 	return CHIAKI_ERR_SUCCESS;

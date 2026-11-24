@@ -226,12 +226,13 @@ class Settings : public QObject
 
 		void LoadProfiles();
 		void SaveProfiles();
+		Settings(const QString &conf, QObject *parent, bool initialize);
 
 	public:
 		explicit Settings(const QString &conf, QObject *parent = nullptr);
 
-		void ExportSettings(QString filepath);
-		void ImportSettings(QString filepath);
+		bool ExportSettings(QString filepath);
+		bool ImportSettings(QString filepath, const QString &destinationProfile = {});
 
 		void ExportPlaceboSettings(QString filepath);
 		void ImportPlaceboSettings(QString filepath);
@@ -340,6 +341,17 @@ class Settings : public QObject
         void SetShowAspectButton(bool show) { settings.setValue("settings/show_aspect_button", show); }
         bool GetShowVolumeButtons() const { return settings.value("settings/show_volume_buttons", true).toBool(); }
         void SetShowVolumeButtons(bool show) { settings.setValue("settings/show_volume_buttons", show); }
+        int GetVideoReorderWindowMs() const
+        {
+            const int ms = settings.value("settings/video_reorder_window_ms", 0).toInt();
+            return ms == 8 || ms == 16 ? ms : 0;
+        }
+        void SetVideoReorderWindowMs(int ms) { settings.setValue("settings/video_reorder_window_ms", ms); }
+        bool GetMutePcAudioWithDualSenseHeadphones() const { return settings.value("settings/mute_pc_audio_with_dualsense_headphones", true).toBool(); }
+        void SetMutePcAudioWithDualSenseHeadphones(bool enabled) { settings.setValue("settings/mute_pc_audio_with_dualsense_headphones", enabled); }
+        static int RunLauncherSettingsCommand(const QString &profile, bool write);
+        static int RunLauncherProfileCommand(const QString &profile, const QString &operation, const QString &value);
+        static int RunLauncherSetupCommand(const QString &profile, const QString &operation);
         bool GetAlwaysRequestIdr() const { return settings.value("settings/always_request_idr", false).toBool(); }
         void SetAlwaysRequestIdr(bool enabled) { settings.setValue("settings/always_request_idr", enabled); }
         bool GetDx12Dither() const { return settings.value("settings/dx12_dither", true).toBool(); }

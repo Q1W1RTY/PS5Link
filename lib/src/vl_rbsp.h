@@ -326,6 +326,7 @@ static inline void vl_rbsp_init(struct vl_rbsp *rbsp, struct vl_vlc *nal, unsign
    for (i = 24; i <= valid; i += 8) {
       if ((vl_vlc_peekbits(&rbsp->nal, i) & 0xffffff) == 0x3) {
          vl_vlc_removebits(&rbsp->nal, i - 8, 8);
+         rbsp->removed += 8;
          i += 8;
       }
    }

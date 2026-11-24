@@ -75,6 +75,80 @@ static const QMap<QString, CLICommand> cli_commands = {
 int RunStream(QGuiApplication &app, const StreamSessionConnectInfo &connect_info);
 int RunMain(QGuiApplication &app, Settings *settings, bool exit_app_on_stream_exit);
 
+#ifdef PS5LINK_BUILD
+namespace {
+constexpr auto readLauncherSettings = "--read-launcher-settings";
+constexpr auto writeLauncherSettings = "--write-launcher-settings";
+constexpr auto importLauncherProfile = "--import-launcher-profile";
+constexpr auto exportLauncherProfile = "--export-launcher-profile";
+constexpr auto switchLauncherProfile = "--switch-launcher-profile";
+constexpr auto launcherPsnUrl = "--launcher-psn-url";
+constexpr auto launcherPsnLogin = "--launcher-psn-login";
+constexpr auto launcherRegister = "--launcher-register-console";
+constexpr auto launcherDiscover = "--launcher-discover-consoles";
+
+bool hasLauncherSettingsCommand(int argc, char *const *argv)
+{
+    const auto isCommand = [](const char *arg, const char *command) {
+        const size_t length = strlen(command);
+        return strncmp(arg, command, length) == 0 && (arg[length] == '\0' || arg[length] == '=');
+    };
+    for(int i = 1; i < argc; ++i)
+        if(isCommand(argv[i], readLauncherSettings) || isCommand(argv[i], writeLauncherSettings)
+            || isCommand(argv[i], importLauncherProfile) || isCommand(argv[i], exportLauncherProfile)
+            || isCommand(argv[i], switchLauncherProfile) || isCommand(argv[i], launcherPsnUrl)
+            || isCommand(argv[i], launcherPsnLogin) || isCommand(argv[i], launcherRegister)
+            || isCommand(argv[i], launcherDiscover))
+            return true;
+    return false;
+}
+
+int runLauncherSettingsCommand(int &argc, char **argv)
+{
+    QCoreApplication app(argc, argv);
+    QCommandLineParser parser;
+    const QCommandLineOption read(readLauncherSettings + 2, "Read the active profile's launcher settings as JSON.");
+    const QCommandLineOption write(writeLauncherSettings + 2, "Apply launcher settings from JSON on standard input.");
+    const QCommandLineOption importProfile(importLauncherProfile + 2, "Import a backup into a new profile.", "file");
+    const QCommandLineOption exportProfile(exportLauncherProfile + 2, "Export the active profile.", "file");
+    const QCommandLineOption switchProfile(switchLauncherProfile + 2, "Activate an existing profile.", "profile");
+    const QCommandLineOption profileOption("profile", "Select a configuration profile for reading or writing.", "profile");
+    const QCommandLineOption psnUrl(launcherPsnUrl + 2, "Get the PSN sign-in URL.");
+    const QCommandLineOption psnLogin(launcherPsnLogin + 2, "Finish PSN sign-in using a redirect from standard input.");
+    const QCommandLineOption registerConsole(launcherRegister + 2, "Register a console using data from standard input.");
+    const QCommandLineOption discoverConsoles(launcherDiscover + 2, "Discover consoles on the local network.");
+    parser.addOptions({read, write, importProfile, exportProfile, switchProfile, profileOption, psnUrl, psnLogin, registerConsole, discoverConsoles});
+    if(!parser.parse(app.arguments()) || !parser.positionalArguments().isEmpty()
+        || int(parser.isSet(read)) + int(parser.isSet(write)) + int(parser.isSet(importProfile))
+            + int(parser.isSet(exportProfile)) + int(parser.isSet(switchProfile)) + int(parser.isSet(psnUrl))
+            + int(parser.isSet(psnLogin)) + int(parser.isSet(registerConsole)) + int(parser.isSet(discoverConsoles)) != 1)
+        return 2;
+    if(parser.isSet(profileOption) && !(parser.isSet(read) || parser.isSet(write)))
+        return 2;
+
+    QSettings defaults(QSettings::IniFormat, QSettings::UserScope, app.organizationName(), app.applicationName());
+    defaults.setFallbacksEnabled(false);
+    const auto profile = parser.isSet(profileOption)
+        ? parser.value(profileOption) : defaults.value("settings/current_profile").toString();
+    if(parser.isSet(importProfile))
+        return Settings::RunLauncherProfileCommand(profile, "import", parser.value(importProfile));
+    if(parser.isSet(exportProfile))
+        return Settings::RunLauncherProfileCommand(profile, "export", parser.value(exportProfile));
+    if(parser.isSet(switchProfile))
+        return Settings::RunLauncherProfileCommand(profile, "switch", parser.value(switchProfile));
+    if(parser.isSet(psnUrl))
+        return Settings::RunLauncherSetupCommand(profile, "psn-url");
+    if(parser.isSet(psnLogin))
+        return Settings::RunLauncherSetupCommand(profile, "psn-login");
+    if(parser.isSet(registerConsole))
+        return Settings::RunLauncherSetupCommand(profile, "register");
+    if(parser.isSet(discoverConsoles))
+        return Settings::RunLauncherSetupCommand(profile, "discover");
+    return Settings::RunLauncherSettingsCommand(profile, parser.isSet(write));
+}
+}
+#endif
+
 int real_main(int argc, char *argv[])
 {
 	qRegisterMetaType<DiscoveryHost>();
@@ -89,6 +163,8 @@ int real_main(int argc, char *argv[])
     QGuiApplication::setOrganizationName("PS5Link");
     QGuiApplication::setApplicationName("PS5Link");
     QGuiApplication::setApplicationDisplayName("PS5Link");
+    if(hasLauncherSettingsCommand(argc, argv))
+        return runLauncherSettingsCommand(argc, argv);
 #else
 	QGuiApplication::setOrganizationName("Chiaki");
 	QGuiApplication::setApplicationName("Chiaki");
@@ -249,6 +325,7 @@ int real_main(int argc, char *argv[])
     const QCommandLineOption psn_test("psn-test", "Run a muted PSN smoke test with the sole registered PS5.", "seconds");
     const QCommandLineOption replay_menu("replay-menu", "Preview the stream menu during local replay.");
     const QCommandLineOption quick_connect("quick-connect", "Connect directly to the preferred or only registered console.");
+    const QCommandLineOption launcher_session("launcher-session", "Return to the launcher when quick connect cannot start.");
     const QCommandLineOption advanced_settings("settings", "Open the advanced settings screen.");
     const QCommandLineOption adaptive_triggers("adaptive-triggers", "Enable or disable DualSense adaptive triggers (on or off).", "state");
     const QCommandLineOption haptics_opt("haptics", "Enable or disable DualSense 3000 Hz haptics and rumble (on or off).", "state");
@@ -258,7 +335,7 @@ int real_main(int argc, char *argv[])
     const QCommandLineOption polling_ms("polling-ms", "Set controller polling interval in milliseconds (1, 2, 4 or 8).", "ms");
     parser.addOptions({online, import_profile, replay, reorder_window, idr_recovery, rtx_vsr, dlss_sr, fsr, sharpness, controllers, dx12, standard_renderer,
         dx12_frame, dx12_frame_number, dx12_generated, psn_test, replay_menu, frame_interpolation, dlss_fg, fsr_fg, no_fg,
-        upscale_target, no_idr_recovery, dx12_present, advanced_settings, quick_connect,
+        upscale_target, no_idr_recovery, dx12_present, advanced_settings, quick_connect, launcher_session,
         adaptive_triggers, haptics_opt, bt_speaker, mic_unmuted, lightbar_opt, polling_ms});
 #endif
 	parser.process(app);
@@ -267,13 +344,15 @@ int real_main(int argc, char *argv[])
 #ifdef PS5LINK_BUILD
     app.setProperty("ps5linkOpenAdvancedSettings", parser.isSet(advanced_settings));
     app.setProperty("ps5linkQuickConnect", parser.isSet(quick_connect) && parser.isSet(online) && !parser.isSet(advanced_settings));
+    app.setProperty("ps5linkLauncherSession", parser.isSet(launcher_session) && app.property("ps5linkQuickConnect").toBool());
     const auto windowMs = parser.value(reorder_window);
     if(windowMs != "0" && windowMs != "8" && windowMs != "16")
     {
         fprintf(stderr, "Expected --reorder-window 0, 8 or 16.\n");
         return 2;
     }
-    app.setProperty("ps5linkReorderWindow", windowMs.toInt());
+    if(parser.isSet(reorder_window))
+        app.setProperty("ps5linkReorderWindow", windowMs.toInt());
     if(parser.isSet(idr_recovery) && parser.isSet(no_idr_recovery))
     {
         fprintf(stderr, "Choose one automatic keyframe setting.\n");
@@ -442,6 +521,9 @@ int real_main(int argc, char *argv[])
         return Ps5LinkImport(parser.value(import_profile));
     if(parser.isSet(controllers))
     {
+#ifdef _WIN32
+        Ds5BtManager::instance().startDiscovery(true);
+#endif
         unsigned detected = 0, dualSense = 0;
         auto *manager = ControllerManager::GetInstance();
         for(int id : manager->GetAvailableControllers())

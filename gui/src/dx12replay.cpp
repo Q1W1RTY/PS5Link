@@ -218,7 +218,7 @@ struct Dx12ReplayWindow::Pipeline
     struct FrameSlot
     {
         ComPtr<ID3D12CommandAllocator> allocator;
-        ComPtr<ID3D12DescriptorHeap> color, downsample, postProcess, fsr, ambient, blit, motion, srMotion;
+        ComPtr<ID3D12DescriptorHeap> color, downsample, postProcess, fsr, ambient, baselineAmbient, blit, motion, srMotion;
         std::shared_ptr<AVFrame> decoded;
         uint64_t fence = 0;
     };
@@ -515,7 +515,7 @@ struct Dx12ReplayWindow::Pipeline
                 "DX12 graphics allocator");
             for(auto *heap : {std::addressof(slot.color), std::addressof(slot.downsample),
                     std::addressof(slot.postProcess), std::addressof(slot.fsr),
-                    std::addressof(slot.ambient), std::addressof(slot.blit)})
+                    std::addressof(slot.ambient), std::addressof(slot.baselineAmbient), std::addressof(slot.blit)})
                 check(device->CreateDescriptorHeap(&shaderViews3, IID_PPV_ARGS(heap->GetAddressOf())),
                     "DX12 frame slot descriptors");
             for(auto *heap : {std::addressof(slot.motion), std::addressof(slot.srMotion)})
@@ -1038,11 +1038,12 @@ struct Dx12ReplayWindow::Pipeline
         transition(commands, target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
     }
 
-    void recordAmbientBackdrop(ID3D12Resource *sourceRgb, ID3D12Resource *target, QSize sourceSize, QSize targetSize)
+    void recordAmbientBackdrop(ID3D12Resource *sourceRgb, ID3D12Resource *target,
+        QSize sourceSize, QSize targetSize, ID3D12DescriptorHeap *heap)
     {
         auto *commands = graphicsCommands.Get();
         const bool fp16 = target->GetDesc().Format == highPrecisionFormat;
-        device->CreateShaderResourceView(sourceRgb, nullptr, ambientViews->GetCPUDescriptorHandleForHeapStart());
+        device->CreateShaderResourceView(sourceRgb, nullptr, heap->GetCPUDescriptorHandleForHeapStart());
         const auto rtv = renderTargetView->GetCPUDescriptorHandleForHeapStart();
         device->CreateRenderTargetView(target, nullptr, rtv);
         transition(commands, sourceRgb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -1057,7 +1058,6 @@ struct Dx12ReplayWindow::Pipeline
             float(ambientStyle.load()), 0.0f,
             left, top, 1.0f - left, 1.0f - top
         };
-        auto *heap = ambientViews.Get();
         commands->SetPipelineState((fp16 ? ambientPipelineFp16 : ambientPipeline).Get());
         commands->SetGraphicsRootSignature(rootSignature.Get());
         commands->SetDescriptorHeaps(1, &heap);
@@ -2681,7 +2681,7 @@ struct Dx12ReplayWindow::Pipeline
             {
                 ensureRgb(highPrecisionFormat);
                 draw(frame, decoded, rgb.Get(), sourceSize);
-                recordAmbientBackdrop(rgb.Get(), stageOutput, sourceSize, size);
+                recordAmbientBackdrop(rgb.Get(), stageOutput, sourceSize, size, ambientViews.Get());
                 draw(frame, decoded, stageOutput, size, false);
             }
             else
@@ -2712,7 +2712,7 @@ struct Dx12ReplayWindow::Pipeline
             {
                 ID3D12Resource *ambSource = useSr ? srInput[1].Get() : rgb.Get();
                 if(ambSource)
-                    recordAmbientBackdrop(ambSource, splitBaseline.Get(), sourceSize, size);
+                    recordAmbientBackdrop(ambSource, splitBaseline.Get(), sourceSize, size, currentSlot->baselineAmbient.Get());
                 draw(frame, decoded, splitBaseline.Get(), size, ambSource == nullptr);
             }
             else

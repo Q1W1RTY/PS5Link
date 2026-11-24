@@ -173,6 +173,7 @@ static bool slice_h264(ChiakiBitstream *bitstream, uint8_t *data, unsigned size,
 		return false;
 	}
 
+	slice->is_idr = nal_unit_type == 5;
 	struct vl_rbsp rbsp;
 	vl_rbsp_init(&rbsp, &vlc, ~0);
 	vl_rbsp_ue(&rbsp); // first_mb_in_slice
@@ -240,7 +241,8 @@ static bool slice_h265(ChiakiBitstream *bitstream, uint8_t *data, unsigned size,
 	vl_vlc_eatbits(&vlc, 6); // nuh_layer_id
 	vl_vlc_eatbits(&vlc, 3); // nuh_temporal_id_plus1
 
-	if(nal_unit_type != 1 && nal_unit_type != 20)
+	slice->is_idr = nal_unit_type == 19 || nal_unit_type == 20;
+	if(nal_unit_type != 1 && !slice->is_idr)
 	{
 		CHIAKI_LOGW(bitstream->log, "parse_slice_h265: Unexpected NAL unit type %u", nal_unit_type);
 		return false;
@@ -249,7 +251,7 @@ static bool slice_h265(ChiakiBitstream *bitstream, uint8_t *data, unsigned size,
 	struct vl_rbsp rbsp;
 	vl_rbsp_init(&rbsp, &vlc, ~0);
 	unsigned first_slice_segment_in_pic_flag = vl_rbsp_u(&rbsp, 1);
-	if(nal_unit_type == 20)
+	if(slice->is_idr)
 		vl_rbsp_u(&rbsp, 1); // no_output_of_prior_pics_flag
 
 	vl_rbsp_ue(&rbsp); // slice_pic_parameter_set_id
@@ -282,12 +284,14 @@ static bool slice_h265(ChiakiBitstream *bitstream, uint8_t *data, unsigned size,
 				return false;
 			}
 			vl_rbsp_ue(&rbsp); // num_positive_pics
+			uint64_t distance = 0;
 			for(unsigned i=0; i<num_negative_pics; i++)
 			{
-				vl_rbsp_ue(&rbsp); // delta_poc_s0_minus1[i]
+				distance += (uint64_t)vl_rbsp_ue(&rbsp) + 1; // delta_poc_s0_minus1[i] + 1
 				if(vl_rbsp_u(&rbsp, 1)) // used_by_curr_pic_s0_flag[i]
 				{
-					slice->reference_frame = i;
+					if(distance <= 0xff)
+						slice->reference_frame = (unsigned)(distance - 1);
 					break;
 				}
 			}
@@ -344,26 +348,38 @@ static bool slice_set_reference_frame_h265(ChiakiBitstream *bitstream, uint8_t *
 			return false;
 		}
 		vl_rbsp_ue(&rbsp); // num_positive_pics
+		uint64_t distance = 0;
+		unsigned target = num_negative_pics, active_count = 0;
+		size_t flag_bits[16];
 		for(unsigned i=0; i<num_negative_pics; i++)
 		{
-			vl_rbsp_ue(&rbsp); // delta_poc_s0_minus1[i]
-			uint32_t *d = (uint32_t*)rbsp.nal.data;
-			uint64_t hi = ntohl(d[-2]);
-			uint64_t lo = ntohl(d[-1]);
-			uint64_t buffer = lo | (hi << 32);
-			uint64_t mask = (uint64_t)1 << (64 - 1 - (64 - (32 - rbsp.nal.invalid_bits)));
-			if (i == reference_frame)
-				buffer |= mask; // set 1
-			else
-				buffer &= ~mask; // set 0
-			hi = htonl(buffer >> 32);
-			lo = htonl(buffer & 0xffffffff);
-			d[-2] = hi;
-			d[-1] = lo;
-			if (i == reference_frame)
-				return true;
-			vl_rbsp_u(&rbsp, 1); // used_by_curr_pic_s0_flag[i]
+			distance += (uint64_t)vl_rbsp_ue(&rbsp) + 1;
+			vl_rbsp_fillbits(&rbsp);
+			// Editing an escaped header requires re-encoding the NAL unit.
+			if(rbsp.removed || vl_vlc_valid_bits(&rbsp.nal) == 0)
+				return false;
+			const size_t flag = (size_t)(rbsp.nal.data - data) * 8 - vl_vlc_valid_bits(&rbsp.nal);
+			if(flag / 8 >= size)
+				return false;
+			flag_bits[i] = flag;
+			if(vl_rbsp_u(&rbsp, 1))
+				++active_count;
+			if(distance - 1 == reference_frame)
+				target = i;
 		}
+		if(target == num_negative_pics || active_count != 1)
+			return false;
+
+		for(unsigned i=0; i<num_negative_pics; i++)
+		{
+			const size_t bit = flag_bits[i];
+			const uint8_t mask = 0x80u >> (bit % 8);
+			if(i == target)
+				data[bit / 8] |= mask;
+			else
+				data[bit / 8] &= (uint8_t)~mask;
+		}
+		return true;
 	}
 
 	return false;

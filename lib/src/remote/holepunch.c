@@ -339,6 +339,7 @@ typedef struct session_t
     UPNPGatewayStatus gw_status;
     ChiakiThread upnp_thread;
     bool upnp_thread_running;
+    bool upnp_thread_join_pending;
 
     uint8_t data1[16];
     uint8_t data2[16];
@@ -792,6 +793,7 @@ CHIAKI_EXPORT Session* chiaki_holepunch_session_init(
     session->gw.data = NULL;
     session->gw_status = GATEWAY_STATUS_UNKNOWN;
     session->upnp_thread_running = false;
+    session->upnp_thread_join_pending = false;
 
     ChiakiErrorCode err;
     err = chiaki_mutex_init(&session->notif_mutex, false);
@@ -831,7 +833,32 @@ CHIAKI_EXPORT Session* chiaki_holepunch_session_init(
     return session;
 }
 
-#define UPNP_DISCOVER_TIMEOUT_MS 2000
+// Reserve time for the gateway description request after SSDP discovery.
+#define UPNP_SSDP_TIMEOUT_MS 1500
+#define UPNP_DISCOVER_TIMEOUT_MS 2500
+
+static void upnp_free_gateway(UPNPGatewayInfo *gw)
+{
+    if(gw->urls)
+    {
+        FreeUPNPUrls(gw->urls);
+        free(gw->urls);
+        gw->urls = NULL;
+    }
+    free(gw->data);
+    gw->data = NULL;
+}
+
+static void upnp_join_discovery(Session *session)
+{
+    if(!session->upnp_thread_join_pending)
+        return;
+    chiaki_thread_join(&session->upnp_thread, NULL);
+#ifdef _WIN32
+    CloseHandle(session->upnp_thread.thread);
+#endif
+    session->upnp_thread_join_pending = false;
+}
 
 static void *upnp_discover_thread_func(void *arg)
 {
@@ -839,15 +866,13 @@ static void *upnp_discover_thread_func(void *arg)
     ChiakiErrorCode err = upnp_get_gateway_info(session->log, &session->gw);
 
     chiaki_mutex_lock(&session->state_mutex);
-    if (err == CHIAKI_ERR_SUCCESS)
+    if (err == CHIAKI_ERR_SUCCESS && session->gw_status == GATEWAY_STATUS_UNKNOWN)
         session->gw_status = GATEWAY_STATUS_FOUND;
     else
     {
-        session->gw_status = GATEWAY_STATUS_NOT_FOUND;
-        free(session->gw.data);
-        session->gw.data = NULL;
-        free(session->gw.urls);
-        session->gw.urls = NULL;
+        if(session->gw_status == GATEWAY_STATUS_UNKNOWN)
+            session->gw_status = GATEWAY_STATUS_NOT_FOUND;
+        upnp_free_gateway(&session->gw);
     }
     session->upnp_thread_running = false;
     chiaki_cond_signal(&session->state_cond);
@@ -857,6 +882,9 @@ static void *upnp_discover_thread_func(void *arg)
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_holepunch_upnp_discover(Session *session)
 {
+    if(session->gw_status != GATEWAY_STATUS_UNKNOWN)
+        return CHIAKI_ERR_SUCCESS;
+
     session->gw.data = calloc(1, sizeof(struct IGDdatas));
     if(!session->gw.data)
     {
@@ -865,7 +893,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_holepunch_upnp_discover(Session *session)
     session->gw.urls = calloc(1, sizeof(struct UPNPUrls));
     if(!session->gw.urls)
     {
-        free(session->gw.data);
+        upnp_free_gateway(&session->gw);
         return CHIAKI_ERR_MEMORY;
     }
 
@@ -881,32 +909,33 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_holepunch_upnp_discover(Session *session)
         else
         {
             session->gw_status = GATEWAY_STATUS_NOT_FOUND;
-            free(session->gw.data);
-            session->gw.data = NULL;
-            free(session->gw.urls);
-            session->gw.urls = NULL;
+            upnp_free_gateway(&session->gw);
         }
         return CHIAKI_ERR_SUCCESS;
     }
 
+    session->upnp_thread_join_pending = true;
+    const uint64_t deadline = chiaki_time_now_monotonic_ms() + UPNP_DISCOVER_TIMEOUT_MS;
     chiaki_mutex_lock(&session->state_mutex);
     while(session->upnp_thread_running)
     {
-        err = chiaki_cond_timedwait(&session->state_cond, &session->state_mutex, UPNP_DISCOVER_TIMEOUT_MS);
-        if(err == CHIAKI_ERR_TIMEOUT)
+        const uint64_t now = chiaki_time_now_monotonic_ms();
+        if(now >= deadline)
+            break;
+        err = chiaki_cond_timedwait(&session->state_cond, &session->state_mutex, deadline - now);
+        if(err != CHIAKI_ERR_SUCCESS)
             break;
     }
 
-    if(session->upnp_thread_running)
-    {
-        chiaki_mutex_unlock(&session->state_mutex);
-        CHIAKI_LOGW(session->log, "UPnP discovery timed out after %d ms, skipping", UPNP_DISCOVER_TIMEOUT_MS);
+    const bool timed_out = session->upnp_thread_running;
+    if(timed_out)
         session->gw_status = GATEWAY_STATUS_NOT_FOUND;
-        return CHIAKI_ERR_SUCCESS;
-    }
     chiaki_mutex_unlock(&session->state_mutex);
 
-    chiaki_thread_join(&session->upnp_thread, NULL);
+    if(timed_out)
+        CHIAKI_LOGW(session->log, "UPnP discovery did not finish in %d ms, using fallback", UPNP_DISCOVER_TIMEOUT_MS);
+    else
+        upnp_join_discovery(session);
     return CHIAKI_ERR_SUCCESS;
 }
 
@@ -1847,12 +1876,7 @@ CHIAKI_EXPORT void chiaki_holepunch_session_fini(Session* session)
         }
     }
     stop_websocket_thread(session);
-    if(session->upnp_thread_running)
-    {
-        CHIAKI_LOGI(session->log, "Waiting for UPnP discovery thread to finish...");
-        chiaki_thread_join(&session->upnp_thread, NULL);
-        session->upnp_thread_running = false;
-    }
+    upnp_join_discovery(session);
     if(session->gw.data)
     {
         if(session->local_port_ctrl != 0)
@@ -1869,8 +1893,7 @@ CHIAKI_EXPORT void chiaki_holepunch_session_fini(Session* session)
             else
                 CHIAKI_LOGE(session->log, "Couldn't delete UPNP local port data mapping");
         }
-        free(session->gw.data);
-        free(session->gw.urls);
+        upnp_free_gateway(&session->gw);
     }
     if (session->oauth_header)
         free(session->oauth_header);
@@ -3826,8 +3849,10 @@ static ChiakiErrorCode upnp_get_gateway_info(ChiakiLog *log, UPNPGatewayInfo *in
 {
     int success = 0;
     struct UPNPDev *devlist = upnpDiscover(
-        2000 /** ms, delay*/, NULL, NULL, 0, 0, 2, &success);
+        UPNP_SSDP_TIMEOUT_MS, NULL, NULL, 0, 0, 2, &success);
     if (devlist == NULL || success != UPNPDISCOVER_SUCCESS) {
+        if(devlist)
+            freeUPNPDevlist(devlist);
         CHIAKI_LOGI(log, "Failed to find UPnP-capable devices on network: err=%d", success);
         return CHIAKI_ERR_NETWORK;
     }

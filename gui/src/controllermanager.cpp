@@ -237,9 +237,10 @@ void ControllerManager::UpdateAvailableControllers()
 {
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 #if defined(PS5LINK_BUILD) && defined(_WIN32)
-	Ds5BtManager::instance().pollDevices();
+	Ds5BtManager::instance().startDiscovery();
 	const bool native_bt_connected = Ds5BtManager::instance().isConnected();
 	const bool has_usb_dualsense = Ds5BtManager::instance().hasUsbDualSense();
+	native_bt_usb_present = has_usb_dualsense;
 #endif
 	QSet<SDL_JoystickID> current_controllers;
 	for(int i=0; i<SDL_NumJoysticks(); i++)
@@ -304,9 +305,10 @@ void ControllerManager::HandleEvents()
 {
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 #if defined(PS5LINK_BUILD) && defined(_WIN32)
-	Ds5BtManager::instance().pollDevices();
-	const bool bt_connected = Ds5BtManager::instance().isConnected();
-	if(bt_connected != available_controllers.contains(Ds5BtManager::kVirtualDeviceId))
+	const auto &nativeBt = Ds5BtManager::instance();
+	const bool bt_connected = nativeBt.isConnected();
+	if(bt_connected != available_controllers.contains(Ds5BtManager::kVirtualDeviceId)
+		|| native_bt_usb_present != nativeBt.hasUsbDualSense())
 		UpdateAvailableControllers();
 	if(bt_connected && (joystick_allow_background_events || is_app_active))
 	{

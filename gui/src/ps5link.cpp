@@ -291,6 +291,11 @@ bool Ps5LinkIsSecretProtected(const QVariant &value)
     return value.toByteArray().startsWith(secretPrefix);
 }
 
+QByteArray Ps5LinkEncodeSecret(const QVariant &value)
+{
+    return encodeSecret(value);
+}
+
 bool Ps5LinkSetSecret(QSettings &settings, const QString &key, const QVariant &value)
 {
     if(value.toByteArray().isEmpty())

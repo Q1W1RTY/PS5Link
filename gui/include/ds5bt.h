@@ -21,7 +21,7 @@ public:
 
 	// Periodically scans Windows Bluetooth HID devices and connects automatically
 	// when a DualSense (0x0CE6) or DualSense Edge (0x0DF2) is paired over Bluetooth.
-	void pollDevices();
+	void startDiscovery(bool waitForInitialScan = false);
 
 	// Shuts down worker threads and releases Bluetooth HID handles.
 	void shutdown();

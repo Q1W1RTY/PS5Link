@@ -36,9 +36,9 @@ HostMAC DiscoveryHost::GetHostMAC() const
 static void DiscoveryServiceHostsCallback(ChiakiDiscoveryHost *hosts, size_t hosts_count, void *user);
 static void DiscoveryServiceHostsManualCallback(ChiakiDiscoveryHost *hosts, size_t hosts_count, void *user);
 
-DiscoveryManager::DiscoveryManager(QObject *parent) : QObject(parent)
+DiscoveryManager::DiscoveryManager(QObject *parent, bool logEnabled) : QObject(parent)
 {
-	chiaki_log_init(&log, CHIAKI_LOG_ALL & ~CHIAKI_LOG_VERBOSE, chiaki_log_cb_print, nullptr);
+	chiaki_log_init(&log, logEnabled ? CHIAKI_LOG_ALL & ~CHIAKI_LOG_VERBOSE : 0, chiaki_log_cb_print, nullptr);
 
 	service_active = false;
 	service_active_ipv6 = false;

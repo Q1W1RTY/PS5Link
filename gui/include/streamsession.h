@@ -167,7 +167,7 @@ class StreamSession : public QObject
 		ChiakiOpusDecoder opus_decoder;
 		ChiakiOpusEncoder opus_encoder;
 		bool connected;
-		bool muted;
+		QAtomicInteger<bool> muted{true};
 		bool mic_connected;
 		bool port_guessing_enabled;
 		int port_guess_count;
@@ -265,7 +265,7 @@ class StreamSession : public QObject
 		QString audio_out_device_name;
 		QString audio_in_device_name;
 		SDL_AudioDeviceID audio_out;
-		SDL_AudioDeviceID audio_in;
+		QAtomicInteger<SDL_AudioDeviceID> audio_in;
 		size_t audio_out_sample_size;
 		QMutex audio_out_ring_mutex;
 		QByteArray audio_out_ring_buf;
@@ -273,6 +273,10 @@ class StreamSession : public QObject
 		size_t audio_out_ring_write_pos = 0;
 		size_t audio_out_ring_fill = 0;
 		bool audio_out_overflow_logged = false;
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+		bool mute_pc_audio_with_dualsense_headphones = true;
+		bool pc_audio_suppressed = false; // guarded by audio_out_ring_mutex
+#endif
 		QMutex audio_out_drain_mutex;
 		QWaitCondition audio_out_drain_wait;
 		QThread *audio_out_drain_thread = nullptr;

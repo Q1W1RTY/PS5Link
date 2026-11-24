@@ -30,6 +30,9 @@ class ControllerManager : public QObject
 	private:
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 		QSet<SDL_JoystickID> available_controllers;
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+		bool native_bt_usb_present = false;
+#endif
 #endif
 		QMap<int, Controller *> open_controllers;
 		QTimer *poll_timer = nullptr;

@@ -10,6 +10,7 @@ Item {
     property list<Item> restoreFocusItems
     property bool initialAsk: false
     property bool quickLaunch: false
+    property bool returnToLauncher: false
     readonly property bool preferSeparateStreamSettingsWindows: Chiaki.window.runtimeRendererBackend === 1 && Chiaki.session
     property bool useSeparateStreamSettingsWindows: false
     Material.theme: Chiaki.settings.themeMode === 1 ? Material.Light : Chiaki.settings.themeMode === 2 ? Material.System : Material.Dark

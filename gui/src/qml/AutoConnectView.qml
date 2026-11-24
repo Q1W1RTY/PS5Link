@@ -15,7 +15,10 @@ Rectangle {
         if (!allowClose)
             return;
         Chiaki.stopAutoConnect();
-        root.showMainView();
+        if (root.returnToLauncher && view.quickLaunch)
+            Qt.exit(7);
+        else
+            root.showMainView();
     }
 
     function cancel() {
@@ -100,7 +103,10 @@ Rectangle {
                 stop();
             } else if (result === Chiaki.QuickConnectResult.ChooseConsole || Date.now() >= deadline) {
                 stop();
-                root.showMainView();
+                if (root.returnToLauncher)
+                    Qt.exit(7);
+                else
+                    root.showMainView();
             }
         }
     }
