@@ -57,7 +57,7 @@ set(SOURCE_FILES
 	)
 set(RESOURCE_FILES "")
 option(PS5LINK_BUILD "Build the isolated PS5Link Windows client" OFF)
-set(PS5LINK_VERSION "1.10.5" CACHE STRING "PS5Link client version")
+set(PS5LINK_VERSION "1.10.6" CACHE STRING "PS5Link client version")
 
 if(APPLE)
 	list(APPEND RESOURCE_FILES "chiaking.icns")

@@ -690,13 +690,14 @@ internal sealed partial class MainWindow : Window
         deadline.CancelAfter(TimeSpan.FromMinutes(6));
         try
         {
-            string? directory = ReleaseUpdate.GetInstallDirectory();
-            if (directory is null)
+            var target = ReleaseUpdate.GetUpdateTarget();
+            if (target is null)
             {
-                ShowUpdateFeedback("Обновление доступно в версии, установленной через Setup.",
-                    "Updates are available from the copy installed by Setup.");
+                ShowUpdateFeedback("Нет прав на запись в папку PS5Link. Запусти установщик вручную.",
+                    "No write permission to the PS5Link folder. Run the installer manually.");
                 return;
             }
+            string directory = target.Directory;
             if (ReleaseUpdate.OtherInstanceIsRunning(directory, GetIdleMonitorProcessId()))
             {
                 ShowUpdateFeedback("Закрой другие окна PS5Link и попробуй снова.",
@@ -728,7 +729,7 @@ internal sealed partial class MainWindow : Window
                 return;
             }
 
-            ReleaseUpdate.StartInstaller(installer, directory, russian);
+            ReleaseUpdate.StartInstaller(installer, directory, russian, target.IsPortable);
             installerStarted = true;
             closeAfterSaving = true;
             Close();

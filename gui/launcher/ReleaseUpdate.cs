@@ -29,19 +29,42 @@ internal static class ReleaseUpdate
         return client;
     }
 
-    internal static string? GetInstallDirectory()
+    internal sealed record UpdateTarget(string Directory, bool IsPortable);
+
+    internal static UpdateTarget? GetUpdateTarget()
     {
         if (!OperatingSystem.IsWindows())
             return null;
 
-        using var key = Registry.CurrentUser.OpenSubKey(UninstallKey);
-        if (key?.GetValue("InstallLocation") is not string location || !Path.IsPathFullyQualified(location))
+        string current = Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppContext.BaseDirectory));
+        using (var key = Registry.CurrentUser.OpenSubKey(UninstallKey))
+        {
+            if (key?.GetValue("InstallLocation") is string location && Path.IsPathFullyQualified(location))
+            {
+                string installed = Path.TrimEndingDirectorySeparator(Path.GetFullPath(location));
+                if (string.Equals(installed, current, StringComparison.OrdinalIgnoreCase))
+                    return new UpdateTarget(installed, IsPortable: false);
+            }
+        }
+
+        // Portable / extracted folder: allow seamless in-place update when this folder
+        // contains both PS5Link executables and is writable by the current user.
+        if (!File.Exists(Path.Combine(current, "PS5Link.exe")) ||
+            !File.Exists(Path.Combine(current, "PS5LinkLauncher.exe")))
             return null;
 
-        string installed = Path.TrimEndingDirectorySeparator(Path.GetFullPath(location));
-        string current = Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
-        return string.Equals(installed, current, StringComparison.OrdinalIgnoreCase) ? installed : null;
+        string probe = Path.Combine(current, $".ps5link-update-probe-{Environment.ProcessId}.tmp");
+        try
+        {
+            using (File.Create(probe)) { }
+            File.Delete(probe);
+            return new UpdateTarget(current, IsPortable: true);
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
     }
+
+    internal static string? GetInstallDirectory() => GetUpdateTarget()?.Directory;
 
     internal static bool OtherInstanceIsRunning(string installDirectory, int? excludedProcessId = null)
     {
@@ -162,15 +185,18 @@ internal static class ReleaseUpdate
         }
     }
 
-    internal static void StartInstaller(string installer, string installDirectory, bool russian)
+    internal static void StartInstaller(string installer, string installDirectory, bool russian, bool portable = false)
     {
         var start = new ProcessStartInfo(installer) { UseShellExecute = false };
-        foreach (string argument in new[]
+        var args = new List<string>
         {
             "/SP-", "/SILENT", "/NORESTART", "/NOCLOSEAPPLICATIONS",
             $"/LANG={(russian ? "russian" : "english")}", $"/DIR={installDirectory}",
             $"/PS5LINKUPDATEPID={Environment.ProcessId}"
-        })
+        };
+        if (portable)
+            args.Add("/NOICONS");
+        foreach (string argument in args)
             start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new IOException("Could not start PS5Link setup.");
     }
