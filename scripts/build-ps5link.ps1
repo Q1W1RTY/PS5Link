@@ -2,7 +2,8 @@
 param(
     [switch]$SkipTests,
     [switch]$SkipBridges,
-    [switch]$SkipLauncher
+    [switch]$SkipLauncher,
+    [string]$MsysRoot = "C:\msys64"
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,19 +21,24 @@ if ($running) {
 Write-Host "[1/4] Building PS5Link client and tests (MSYS2 MINGW64)..." -ForegroundColor Cyan
 $env:MSYSTEM = "MINGW64"
 $env:CHERE_INVOKING = "1"
-$bash = "C:\msys64\usr\bin\bash.exe"
+$env:PS5LINK_BUILD_ROOT = $root
+$bash = Join-Path $MsysRoot "usr\bin\bash.exe"
 if (-not (Test-Path $bash)) {
     throw "MSYS2 bash not found at $bash"
 }
 
-$targets = if ($SkipTests) { "chiaki" } else { "chiaki chiaki-unit ps5link-receiver-test" }
-& $bash -lc "cd '$($root -replace '\\','/')' && cmake --build build-offline/client --target $targets"
-if ($LASTEXITCODE -ne 0) { throw "Client build failed ($LASTEXITCODE)" }
+$targets = if ($SkipTests) { "chiaki" } else { "chiaki chiaki-unit ps5link-receiver-test ps5link-controller-idle-test" }
+try {
+    & $bash -lc "cd `"`$(cygpath -u `"`$PS5LINK_BUILD_ROOT`")`" && cmake --build build-offline/client --target $targets"
+    if ($LASTEXITCODE -ne 0) { throw "Client build failed ($LASTEXITCODE)" }
 
-if (-not $SkipTests) {
-    Write-Host "[2/4] Running CTest..." -ForegroundColor Cyan
-    & $bash -lc "cd '$($root -replace '\\','/')' && ctest --test-dir build-offline/client --output-on-failure"
-    if ($LASTEXITCODE -ne 0) { throw "Tests failed ($LASTEXITCODE)" }
+    if (-not $SkipTests) {
+        Write-Host "[2/4] Running CTest..." -ForegroundColor Cyan
+        & $bash -lc "cd `"`$(cygpath -u `"`$PS5LINK_BUILD_ROOT`")`" && ctest --test-dir build-offline/client --output-on-failure"
+        if ($LASTEXITCODE -ne 0) { throw "Tests failed ($LASTEXITCODE)" }
+    }
+} finally {
+    Remove-Item Env:PS5LINK_BUILD_ROOT -ErrorAction SilentlyContinue
 }
 
 if (-not $SkipBridges) {
@@ -71,5 +77,6 @@ if (-not $SkipLauncher) {
     Copy-Item (Join-Path $launcherPublish "PS5LinkLauncher.exe") -Destination $dist -Force
 }
 
+New-Item -ItemType Directory -Path $dist -Force | Out-Null
 Copy-Item (Join-Path $buildDir "gui\PS5Link.exe") (Join-Path $dist "PS5Link.exe") -Force
 Write-Host "Done! Portable build updated in $dist" -ForegroundColor Green

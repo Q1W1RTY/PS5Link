@@ -23,12 +23,11 @@ to video, network, controller and appearance settings.
 1. Download the [Windows x64 installer](https://github.com/Q1W1RTY/PS5Link/releases/latest).
    Setup installs for the current user and adds a Start menu shortcut.
 2. Enable Remote Play on your PlayStation. In PS5Link, open
-   **Advanced settings → Consoles → Register New** and enter the pairing
-   code shown on the console. For connections outside your local network,
-   sign in to PlayStation Network under **Remote**.
-3. Close the settings window and press **Connect**. PS5Link selects the
-   console marked for auto-connect or the only registered console. If a
-   manual choice is needed, it opens the console list.
+   **Settings and profiles → Consoles & PSN** to sign in to PlayStation Network
+   for remote connections or register a console on your local network with the
+   pairing code shown on the console.
+3. Close the settings window and press **Connect**. If multiple consoles are
+   registered, pick one in the **Console** dropdown in the launcher.
 
 ### Video and controls
 
@@ -62,12 +61,11 @@ PS5Link передаёт изображение и звук с PS5 или PS4 н
    Он устанавливает приложение для текущего пользователя и добавляет
    ярлык в меню «Пуск».
 2. Включите дистанционное воспроизведение на PlayStation. В PS5Link
-   откройте **«Дополнительно» → «Консоли» → «Зарегистрировать новую»**
-   и введите код привязки с экрана PlayStation. Для подключения вне
-   локальной сети войдите в PlayStation Network во вкладке **«Сеть»**.
-3. Закройте настройки и нажмите **«Подключиться»**. PS5Link выберет консоль,
-   отмеченную для автоподключения, или единственную зарегистрированную.
-   Если нужен ручной выбор, откроется список.
+   откройте **«Настройки и профили» → «Консоли и PSN»**, чтобы войти в
+   PlayStation Network для подключения вне локальной сети или зарегистрировать
+   консоль по коду привязки с экрана PlayStation.
+3. Закройте настройки и нажмите **«Подключиться»**. Если зарегистрировано
+   несколько консолей, выберите нужную в списке **«Консоль»** в лаунчере.
 
 ### Видео и управление
 

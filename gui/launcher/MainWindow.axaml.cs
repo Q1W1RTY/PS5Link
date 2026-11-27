@@ -68,6 +68,7 @@ internal sealed partial class MainWindow : Window
     protected override async void OnOpened(EventArgs e)
     {
         base.OnOpened(e);
+        ReleaseUpdate.CleanupStaleInstaller();
         if (Screens.ScreenFromWindow(this) is { } screen)
             Viewport.MaxHeight = Math.Max(120, screen.WorkingArea.Height / screen.Scaling - 50);
         if (!ClientRunner.IsAvailable(AppContext.BaseDirectory))
@@ -264,6 +265,18 @@ internal sealed partial class MainWindow : Window
         }
     }
 
+    private int? GetIdleMonitorProcessId()
+    {
+        try
+        {
+            return idleMonitor is { HasExited: false } process ? process.Id : null;
+        }
+        catch (Exception error) when (error is InvalidOperationException or Win32Exception)
+        {
+            return null;
+        }
+    }
+
     private void StopIdleMonitor()
     {
         if (idleMonitor is not { } process)
@@ -276,7 +289,7 @@ internal sealed partial class MainWindow : Window
                 process.WaitForExit(1500);
             }
         }
-        catch (InvalidOperationException)
+        catch (Exception error) when (error is InvalidOperationException or Win32Exception)
         {
             // The monitor can exit between checking its state and stopping it.
         }
@@ -411,11 +424,12 @@ internal sealed partial class MainWindow : Window
     {
         base.OnClosing(e);
         if (e.Cancel || closeAfterSaving || savedPreferences is null
+            || e.CloseReason is WindowCloseReason.OSShutdown or WindowCloseReason.ApplicationShutdown
             || (savedPreferences == GetPreferences() && savedConsole == SelectedConsole))
             return;
 
         e.Cancel = true;
-        if (busy)
+        if (busy || updating)
             return;
 
         busy = true;
@@ -429,6 +443,8 @@ internal sealed partial class MainWindow : Window
         catch (Exception error) when (IsSettingsError(error))
         {
             ReportSettingsError(error);
+            // Allow the next close attempt instead of trapping the window forever.
+            closeAfterSaving = true;
         }
         finally
         {
@@ -490,7 +506,7 @@ internal sealed partial class MainWindow : Window
                 Target.SelectedIndex = 0;
 
             Start.IsEnabled = Advanced.IsEnabled = UpdateButton.IsEnabled = !busy && !updating;
-            bool editable = !busy && savedPreferences is not null;
+            bool editable = !busy && !updating && savedPreferences is not null;
             Dx12.IsEnabled = Upscale.IsEnabled = ConsolePicker.IsEnabled = editable;
             RtxPreset.IsEnabled = StandardPreset.IsEnabled = editable;
             Timing.IsEnabled = editable && dx12;
@@ -500,7 +516,8 @@ internal sealed partial class MainWindow : Window
             AdaptiveTriggers.IsEnabled = Haptics.IsEnabled = BtSpeaker.IsEnabled = MutePcAudio.IsEnabled = MicUnmuted.IsEnabled = editable;
             Lightbar.IsEnabled = Polling.IsEnabled = editable;
 
-            RendererText.Text = dx12 ? "Direct3D 12" : "Vulkan";
+            RendererText.Text = dx12 ? "Direct3D 12"
+                : (profileSnapshot?.Advanced["Renderer"]?.GetValue<int>() == 1 ? "OpenGL" : "Vulkan");
             string scaling = Upscale.SelectedIndex <= 0 ? Localize("Шейдер", "Shader") : ScalingNames[Upscale.SelectedIndex];
             string targetBadge = canSelectTarget
                 ? Target.SelectedIndex switch
@@ -531,7 +548,7 @@ internal sealed partial class MainWindow : Window
 
     private void ApplyPreset(int upscale)
     {
-        if (busy)
+        if (busy || updating)
             return;
 
         syncing = true;
@@ -621,7 +638,22 @@ internal sealed partial class MainWindow : Window
         try
         {
             if (savedPreferences is null)
+            {
                 await LoadClientSettingsAsync();
+                if (consoles.Length == 0)
+                {
+                    busy = false;
+                    Refresh();
+                    await OpenAdvancedAsync(consoleSetup: true);
+                    return;
+                }
+                if (consoles.Length > 1 && SelectedConsole.Length == 0)
+                {
+                    SetStatus("Выбери консоль для подключения", "Select a console to connect", 0xFF9F0A);
+                    ConsolePicker.Focus();
+                    return;
+                }
+            }
             await SaveClientSettingsAsync();
             StopIdleMonitor();
             int exitCode = await ClientRunner.RunAsync(folder);
@@ -652,6 +684,7 @@ internal sealed partial class MainWindow : Window
             return;
 
         updating = true;
+        bool installerStarted = false;
         Refresh();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(windowLifetime.Token);
         deadline.CancelAfter(TimeSpan.FromMinutes(6));
@@ -664,7 +697,7 @@ internal sealed partial class MainWindow : Window
                     "Updates are available from the copy installed by Setup.");
                 return;
             }
-            if (ReleaseUpdate.OtherInstanceIsRunning(directory))
+            if (ReleaseUpdate.OtherInstanceIsRunning(directory, GetIdleMonitorProcessId()))
             {
                 ShowUpdateFeedback("Закрой другие окна PS5Link и попробуй снова.",
                     "Close other PS5Link windows and try again.");
@@ -682,6 +715,11 @@ internal sealed partial class MainWindow : Window
             ShowUpdateFeedback($"Скачиваем версию {release.Version}…", $"Downloading version {release.Version}…");
             string installer = await ReleaseUpdate.DownloadAsync(release, deadline.Token);
             deadline.Token.ThrowIfCancellationRequested();
+            if (savedPreferences is not null
+                && (savedPreferences != GetPreferences() || savedConsole != SelectedConsole))
+            {
+                await SaveClientSettingsAsync();
+            }
             StopIdleMonitor();
             if (ReleaseUpdate.OtherInstanceIsRunning(directory))
             {
@@ -691,6 +729,8 @@ internal sealed partial class MainWindow : Window
             }
 
             ReleaseUpdate.StartInstaller(installer, directory, russian);
+            installerStarted = true;
+            closeAfterSaving = true;
             Close();
         }
         catch (OperationCanceledException) when (windowLifetime.IsCancellationRequested) { }
@@ -705,7 +745,7 @@ internal sealed partial class MainWindow : Window
         finally
         {
             updating = false;
-            if (!windowLifetime.IsCancellationRequested)
+            if (!installerStarted && !windowLifetime.IsCancellationRequested)
             {
                 RefreshIdleMonitor();
                 Refresh();

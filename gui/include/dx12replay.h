@@ -34,6 +34,7 @@ public:
     void setVsrQuality(int quality);
     void setFrameGeneration(int mode);
     void applyWindowMode(int mode);
+    void setReplayPreview(int mode, int page = 0);
     unsigned dlssGeneratedFrames() const;
     unsigned dlssSrFrames() const;
 
@@ -75,7 +76,10 @@ private:
     QPointer<StreamSession> session;
     QPointer<QmlSettings> settings;
     QTimer *cursorTimer = nullptr;
+    QTimer *dockHideTimer = nullptr;
     bool cursorHidden = false;
     bool touchpadMouseActive = false;
     bool touchpadMouseClickBtn = false;
+    Qt::MouseButton touchpadMouseButton = Qt::NoButton;
+    bool imguiMouseDown = false;
 };

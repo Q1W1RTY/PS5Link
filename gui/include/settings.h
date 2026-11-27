@@ -846,6 +846,8 @@ class Settings : public QObject
 		void SetControllerMapping(const QString &vidpid, const QString &mapping);
 		void RemoveControllerMapping(const QString &vidpid);
 
+		static bool IsValidProfileName(const QString &name);
+		static QString GetChiakiControllerButtonKey(int);
 		static QString GetChiakiControllerButtonName(int);
 		void SetControllerButtonMapping(int, Qt::Key);
 		QMap<int, Qt::Key> GetControllerMapping();

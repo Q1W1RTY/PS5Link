@@ -13,10 +13,10 @@ Item {
     property bool returnToLauncher: false
     readonly property bool preferSeparateStreamSettingsWindows: Chiaki.window.runtimeRendererBackend === 1 && Chiaki.session
     property bool useSeparateStreamSettingsWindows: false
-    Material.theme: Chiaki.settings.themeMode === 1 ? Material.Light : Chiaki.settings.themeMode === 2 ? Material.System : Material.Dark
+    Material.theme: Material.Dark
     Material.accent: "#0A84FF"
-    Material.background: Chiaki.settings.themeMode === 1 ? "#F5F6FA" : "#18181B"
-    Material.foreground: Chiaki.settings.themeMode === 1 ? "#262830" : "#F0F1F3"
+    Material.background: "#18181B"
+    Material.foreground: "#F0F1F3"
 
     function controllerButton(name) {
         let type = "deck";
@@ -244,8 +244,8 @@ Item {
         stack.push(steamShortcutDialogComponent, {fromReminder: fromReminder});
     }
 
-    function showPSNTokenDialog(psnurl, expired) {
-        stack.push(psnTokenDialogComponent, {psnurl: psnurl, expired: expired});
+    function showPSNTokenDialog(expired) {
+        stack.push(psnTokenDialogComponent, {psnurl: "", expired: !!expired});
     }
 
     function showControllerMappingDialog() {

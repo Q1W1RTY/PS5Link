@@ -1,6 +1,9 @@
 #include "qmlsettings.h"
 #include "sessionlog.h"
 #include "controllermanager.h"
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+#include "ds5bt.h"
+#endif
 
 #include <QSet>
 #include <QDesktopServices>
@@ -139,6 +142,8 @@ void QmlSettings::setDx12FrameGeneration(int mode)
     if(mode == dx12FrameGeneration())
         return;
     settings->SetDx12FrameGeneration(mode);
+    if(mode > 0)
+        settings->SetDx12DlssSr(0);
     emit dx12FrameGenerationChanged();
 }
 
@@ -400,6 +405,7 @@ void QmlSettings::applyPxPlayKeyboardPreset()
 void QmlSettings::resetVideoSettings()
 {
     settings->ResetVideoSettings();
+    emit videoSettingsReset();
     refreshAllKeys();
 }
 
@@ -408,6 +414,11 @@ void QmlSettings::resetStreamSettings()
     settings->ResetStreamSettings();
     ControllerManager::GetInstance()->SetPollingIntervalMs(settings->GetControllerPollingMs());
     QCoreApplication::instance()->setProperty("ps5linkGamepadQuitHotkey", settings->GetGamepadQuitHotkey());
+#ifdef _WIN32
+    Ds5BtManager::instance().setIdlePolicy({settings->GetGamepadIdleEnabled(), settings->GetGamepadIdleDesktop(),
+        settings->GetGamepadIdleStream(), settings->GetGamepadIdleKeepCharging()});
+    Ds5BtManager::instance().setSpeakerAudioEnabled(settings->GetBtSpeakerAudio());
+#endif
     refreshAllKeys();
 }
 
@@ -2314,6 +2325,7 @@ void QmlSettings::refreshAllKeys()
     emit portGuessCountChanged();
     emit portGuessSocketCountChanged();
     emit decoderChanged();
+    emit useZeroCopyChanged();
     emit windowTypeChanged();
     emit customResolutionWidthChanged();
     emit customResolutionHeightChanged();

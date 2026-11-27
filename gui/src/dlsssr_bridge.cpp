@@ -33,27 +33,34 @@ extern "C" __declspec(dllexport) void *Ps5LinkDlssSrCreate(ID3D12Device *device,
     unsigned width, unsigned height, unsigned targetWidth, unsigned targetHeight,
     bool model45, int *status) noexcept
 {
+    int localStatus = NVSDK_NGX_Result_Fail;
+    int &outStatus = status ? *status : localStatus;
     try
     {
+        if(!device || !commands || !directory || !dataPath || width == 0 || height == 0 || targetWidth == 0 || targetHeight == 0)
+        {
+            outStatus = NVSDK_NGX_Result_FAIL_InvalidParameter;
+            return nullptr;
+        }
         auto sr = std::make_unique<SuperResolution>();
         const auto runtimePath = std::filesystem::path(directory) / L"nvngx_dlss.dll";
         sr->runtime = LoadLibraryExW(runtimePath.c_str(), nullptr,
             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
         if(!sr->runtime)
         {
-            *status = HRESULT_FROM_WIN32(GetLastError());
+            outStatus = HRESULT_FROM_WIN32(GetLastError());
             return nullptr;
         }
         NVSDK_NGX_FeatureCommonInfo info{};
         info.PathListInfo.Path = &directory;
         info.PathListInfo.Length = 1;
-        *status = NVSDK_NGX_D3D12_Init_with_ProjectID("a9a3e71b-7b03-4a87-9fdf-91d38bc3d5ae",
+        outStatus = NVSDK_NGX_D3D12_Init_with_ProjectID("a9a3e71b-7b03-4a87-9fdf-91d38bc3d5ae",
             NVSDK_NGX_ENGINE_TYPE_CUSTOM, "1.0", dataPath, device, &info);
-        if(*status != NVSDK_NGX_Result_Success)
+        if(outStatus != NVSDK_NGX_Result_Success)
             return nullptr;
         sr->device = device;
-        *status = NVSDK_NGX_D3D12_AllocateParameters(&sr->parameters);
-        if(*status != NVSDK_NGX_Result_Success)
+        outStatus = NVSDK_NGX_D3D12_AllocateParameters(&sr->parameters);
+        if(outStatus != NVSDK_NGX_Result_Success)
             return nullptr;
 
         const auto preset = model45 ? NVSDK_NGX_DLSS_Hint_Render_Preset_M : NVSDK_NGX_DLSS_Hint_Render_Preset_K;
@@ -78,12 +85,12 @@ extern "C" __declspec(dllexport) void *Ps5LinkDlssSrCreate(ID3D12Device *device,
         else
             create.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_MaxPerf;
         create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
-        *status = NGX_D3D12_CREATE_DLSS_EXT(commands, 1, 1, &sr->feature, sr->parameters, &create);
-        return *status == NVSDK_NGX_Result_Success ? sr.release() : nullptr;
+        outStatus = NGX_D3D12_CREATE_DLSS_EXT(commands, 1, 1, &sr->feature, sr->parameters, &create);
+        return outStatus == NVSDK_NGX_Result_Success ? sr.release() : nullptr;
     }
     catch(...)
     {
-        *status = E_FAIL;
+        outStatus = E_FAIL;
         return nullptr;
     }
 }

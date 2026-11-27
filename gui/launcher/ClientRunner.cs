@@ -128,8 +128,12 @@ internal static class ClientRunner
         }
         catch (OperationCanceledException)
         {
-            if (!process.HasExited)
-                process.Kill();
+            try
+            {
+                if (!process.HasExited)
+                    process.Kill();
+            }
+            catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception) { }
             throw;
         }
     }

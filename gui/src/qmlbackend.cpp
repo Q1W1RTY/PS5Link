@@ -573,9 +573,10 @@ void QmlBackend::teardownSession()
     {
         window->setExternalStatsTarget(nullptr);
         dx12_output->report();
+        dx12_output_active.storeRelaxed(0);
         dx12_output.reset();
         if(window && !window->isVisible() && !qApp->property("ps5linkPsnTestSeconds").toInt()
-            && !qApp->property("ps5linkExiting").toBool())
+            && !qApp->property("ps5linkExiting").toBool() && !window->shouldExitOnStreamExit())
         {
             window->show();
             window->raise();
@@ -673,7 +674,7 @@ void QmlBackend::resumeFromSleep()
         if(session_info.duid.isEmpty())
         {
             createSession({
-                session_info.settings,
+                this->settings,
                 session_info.target,
                 session_info.host,
                 session_info.nickname,
@@ -986,17 +987,29 @@ void QmlBackend::checkPsnConnection(const ChiakiErrorCode &err)
         case CHIAKI_ERR_HOST_DOWN:
             setConnectState(PsnConnectState::ConnectFailedStart);
             teardownSession();
+#ifdef PS5LINK_BUILD
+            setDiscoveryEnabled(settings->GetDiscoveryEnabled());
+#else
             setDiscoveryEnabled(true);
+#endif
             break;
         case CHIAKI_ERR_HOST_UNREACH:
             setConnectState(PsnConnectState::ConnectFailedConsoleUnreachable);
             teardownSession();
+#ifdef PS5LINK_BUILD
+            setDiscoveryEnabled(settings->GetDiscoveryEnabled());
+#else
             setDiscoveryEnabled(true);
+#endif
             break;
         default:
             setConnectState(PsnConnectState::ConnectFailed);
             teardownSession();
+#ifdef PS5LINK_BUILD
+            setDiscoveryEnabled(settings->GetDiscoveryEnabled());
+#else
             setDiscoveryEnabled(true);
+#endif
             break;
     }
 }
@@ -1214,6 +1227,7 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
         try
         {
             dx12_output = std::make_unique<Dx12ReplayWindow>();
+            dx12_output_active.storeRelaxed(1);
             dx12_frame_gap.storeRelaxed(0);
             session_info.hw_decoder = "d3d12va";
             session_info.hw_device_ctx = dx12_output->decoderDevice();
@@ -1224,6 +1238,7 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
         }
         catch(const std::exception &failure)
         {
+            dx12_output_active.storeRelaxed(0);
             emit error(tr("DX12"), QString::fromUtf8(failure.what()));
             return;
         }
@@ -1233,6 +1248,7 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
         session = new StreamSession(session_info, this);
     } catch (const Exception &e) {
 #ifdef PS5LINK_BUILD
+        dx12_output_active.storeRelaxed(0);
         dx12_output.reset();
 #endif
         emit error(tr("Stream failed"), tr("Failed to initialize Stream Session: %1").arg(e.what()));
@@ -1264,6 +1280,10 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
         });
         connect(settings_qml, &QmlSettings::dx12FrameGenerationChanged, output, [this, output] {
             output->setFrameGeneration(settings_qml->dx12FrameGeneration());
+        });
+        connect(settings_qml, &QmlSettings::dx12WindowModeChanged, output, [this, output] {
+            if(output->isVisible())
+                output->applyWindowMode(settings_qml->dx12WindowMode());
         });
         connect(dx12_output.get(), &Dx12ReplayWindow::allSettingsRequested, window, &QmlMainWindow::showFullStreamSettings, Qt::QueuedConnection);
         connect(dx12_output.get(), &Dx12ReplayWindow::disconnectRequested, this, [this](bool sleep, bool exitApp) {
@@ -1393,7 +1413,11 @@ void QmlBackend::createSession(const StreamSessionConnectInfo &connect_info)
         emit sessionChanged(session);
 
         sleep_inhibit->release();
+#ifdef PS5LINK_BUILD
+        setDiscoveryEnabled(settings->GetDiscoveryEnabled());
+#else
         setDiscoveryEnabled(true);
+#endif
 #ifdef Q_OS_WINDOWS
         qCInfo(chiakiGui) << "Checking sleep state: ";
         if(windows_wake_sleep->getWakeState() == WindowsWakeState::Awake)
@@ -1801,8 +1825,7 @@ QmlBackend::QuickConnectResult QmlBackend::tryQuickConnect()
             server.psn_host = match.value();
             server.duid = match.key();
             server.registered_host = target;
-            connectToServer(server, nickname);
-            return QuickConnectResult::Started;
+            return connectToServer(server, nickname) ? QuickConnectResult::Started : QuickConnectResult::ChooseConsole;
         }
     }
 
@@ -1819,14 +1842,14 @@ void QmlBackend::connectToHost(int index, QString nickname)
         connectToServer(server, std::move(nickname));
 }
 
-void QmlBackend::connectToServer(const DisplayServer &server, QString nickname)
+bool QmlBackend::connectToServer(const DisplayServer &server, QString nickname)
 {
     window->setWindowAdjustable(false);
 
     if (!server.registered) {
         regist_dialog_server = server;
         emit registDialogRequested(server.GetHostAddr(), server.IsPS5(), server.duid);
-        return;
+        return false;
     }
 
     if (server.discovered && server.discovery_host.state == CHIAKI_DISCOVERY_HOST_STATE_STANDBY)
@@ -1838,15 +1861,16 @@ void QmlBackend::connectToServer(const DisplayServer &server, QString nickname)
         {
             qCWarning(chiakiGui) << "Couldn't wakeup server";
             window->setWindowAdjustable(true);
-            return;
+            return false;
         }
         if(nickname.isEmpty())
         {
             qCWarning(chiakiGui) << "No nickname given for registered connection, not connecting...";
-            return;
+            window->setWindowAdjustable(true);
+            return false;
         }
         waking_sleeping_nicknames.append(nickname);
-        QTimer::singleShot(WAKEUP_PSN_IGNORE_SECONDS * 1000, [this, nickname]{
+        QTimer::singleShot(WAKEUP_PSN_IGNORE_SECONDS * 1000, this, [this, nickname]{
             waking_sleeping_nicknames.removeOne(nickname);
             emit hostsChanged();
         });
@@ -1893,6 +1917,7 @@ void QmlBackend::connectToServer(const DisplayServer &server, QString nickname)
                 zoom,
                 stretch);
         createSession(info);
+        return session != nullptr;
     }
     else
     {
@@ -1913,7 +1938,10 @@ void QmlBackend::connectToServer(const DisplayServer &server, QString nickname)
         QString expiry_s = settings->GetPsnAuthTokenExpiry();
         QString refresh = settings->GetPsnRefreshToken();
         if(expiry_s.isEmpty() || refresh.isEmpty())
-            return;
+        {
+            window->setWindowAdjustable(true);
+            return false;
+        }
         QDateTime expiry = QDateTime::fromString(expiry_s, settings->GetTimeFormat());
         // give 1 minute buffer
         QDateTime now = QDateTime::currentDateTime().addSecs(60);
@@ -1922,6 +1950,7 @@ void QmlBackend::connectToServer(const DisplayServer &server, QString nickname)
             PSNToken *psnToken = new PSNToken(settings, this);
             connect(psnToken, &PSNToken::PSNTokenError, this, [this](const QString &error) {
                 qCWarning(chiakiGui) << "Could not refresh token. Automatic PSN Connection Unavailable!" << error;
+                setConnectState(PsnConnectState::ConnectFailed);
             });
             connect(psnToken, &PSNToken::UnauthorizedError, this, &QmlBackend::psnCredsExpired);
             connect(psnToken, &PSNToken::PSNTokenSuccess, this, []() {
@@ -1930,12 +1959,16 @@ void QmlBackend::connectToServer(const DisplayServer &server, QString nickname)
             connect(psnToken, &PSNToken::PSNTokenSuccess, this, [this, info]() {
                 createSession(info);
             });
-                connect(psnToken, &PSNToken::Finished, psnToken, &QObject::deleteLater);
+            connect(psnToken, &PSNToken::Finished, psnToken, &QObject::deleteLater);
             QString refresh_token = settings->GetPsnRefreshToken();
             psnToken->RefreshPsnToken(std::move(refresh_token));
+            return true;
         }
         else
+        {
             createSession(info);
+            return session != nullptr;
+        }
     }
 }
 
@@ -1946,9 +1979,10 @@ void QmlBackend::stopSession(bool sleep)
 
     if (!session_info.nickname.isEmpty())
     {
-        waking_sleeping_nicknames.append(session_info.nickname);
-        QTimer::singleShot(WAKEUP_PSN_IGNORE_SECONDS * 1000, [this]{
-            waking_sleeping_nicknames.removeOne(session_info.nickname);
+        const QString nick = session_info.nickname;
+        waking_sleeping_nicknames.append(nick);
+        QTimer::singleShot(WAKEUP_PSN_IGNORE_SECONDS * 1000, this, [this, nick]{
+            waking_sleeping_nicknames.removeOne(nick);
             emit hostsChanged();
         });
     }
@@ -2001,7 +2035,7 @@ bool QmlBackend::handlePsnLoginRedirect(const QUrl &url)
         emit psnLoginAccountIdDone(accountId);
     });
     connect(psnId, &PSNAccountID::AccountIDResponse, this, &QmlBackend::updatePsnHosts);
-    connect(psnId, &PSNAccountID::AccountIDError, [this](const QString &error) {
+    connect(psnId, &PSNAccountID::AccountIDError, this, [this](const QString &error) {
         qCWarning(chiakiGui) << "Could not retrieve psn token or account Id!" << error;
         emit psnLoginAccountIdError(error);
     });

@@ -649,9 +649,9 @@ inline constexpr char kDownsampleShader[] = R"(
         float3 minLin = 1e6;
         float3 maxLin = -1e6;
 
-        [unroll] for (int dy = -2; dy <= 3; ++dy) {
+        [unroll] for (int dy = -3; dy <= 4; ++dy) {
             float wy = lanczos2((float(center.y + dy) - srcPos.y) * invScale.y);
-            [unroll] for (int dx = -2; dx <= 3; ++dx) {
+            [unroll] for (int dx = -3; dx <= 4; ++dx) {
                 float wx = lanczos2((float(center.x + dx) - srcPos.x) * invScale.x);
                 float w = wx * wy;
                 int2 tc = clamp(center + int2(dx, dy), int2(0, 0), maxCoord);

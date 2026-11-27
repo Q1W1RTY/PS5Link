@@ -94,6 +94,7 @@ struct StreamBoostState
     int refCount = 0;
     bool timerRaised = false;
     bool sleepBlocked = false;
+    HANDLE powerRequest = INVALID_HANDLE_VALUE;
     bool priorityRaised = false;
     DWORD previousPriorityClass = NORMAL_PRIORITY_CLASS;
     HMODULE wlanLib = nullptr;
@@ -102,29 +103,45 @@ struct StreamBoostState
     FnWlanCloseHandle closeHandle = nullptr;
     FnWlanSetInterface setInterface = nullptr;
 
-    void acquire(const Ps5LinkBoostOptions &options)
+    void applyOptionsLocked(const Ps5LinkBoostOptions &options)
     {
-        std::lock_guard<std::mutex> lock(mutex);
-        if(++refCount > 1)
-            return;
         if(options.turboMode)
         {
-            if(timeBeginPeriod(1) == TIMERR_NOERROR)
+            if(!timerRaised && timeBeginPeriod(1) == TIMERR_NOERROR)
                 timerRaised = true;
-            previousPriorityClass = GetPriorityClass(GetCurrentProcess());
-            if(previousPriorityClass != 0 && previousPriorityClass != ABOVE_NORMAL_PRIORITY_CLASS
-                && previousPriorityClass != HIGH_PRIORITY_CLASS)
+            if(!priorityRaised)
             {
-                if(SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS))
-                    priorityRaised = true;
+                previousPriorityClass = GetPriorityClass(GetCurrentProcess());
+                if(previousPriorityClass != 0 && previousPriorityClass != ABOVE_NORMAL_PRIORITY_CLASS
+                    && previousPriorityClass != HIGH_PRIORITY_CLASS)
+                {
+                    if(SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS))
+                        priorityRaised = true;
+                }
             }
         }
-        if(options.preventSleep)
+        if(options.preventSleep && !sleepBlocked)
         {
-            SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
-            sleepBlocked = true;
+            // PowerCreateRequest is process-scoped (not thread-local like SetThreadExecutionState),
+            // so release() clears it reliably regardless of which thread calls it.
+            REASON_CONTEXT reason{};
+            reason.Version = POWER_REQUEST_CONTEXT_VERSION;
+            reason.Flags = POWER_REQUEST_CONTEXT_SIMPLE_STRING;
+            reason.Reason.SimpleReasonString = const_cast<LPWSTR>(L"PS5Link Remote Play active");
+            powerRequest = PowerCreateRequest(&reason);
+            if(powerRequest != INVALID_HANDLE_VALUE)
+            {
+                PowerSetRequest(powerRequest, PowerRequestDisplayRequired);
+                PowerSetRequest(powerRequest, PowerRequestSystemRequired);
+                sleepBlocked = true;
+            }
+            else
+            {
+                SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
+                sleepBlocked = true;
+            }
         }
-        if(!options.wifiMediaMode)
+        if(!options.wifiMediaMode || wlanHandle)
             return;
 
         wlanLib = LoadLibraryExW(L"wlanapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -183,6 +200,13 @@ struct StreamBoostState
                 boostedWifiInterfaces.size());
     }
 
+    void acquire(const Ps5LinkBoostOptions &options)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        ++refCount;
+        applyOptionsLocked(options);
+    }
+
     void release()
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -208,7 +232,17 @@ struct StreamBoostState
         }
         if(sleepBlocked)
         {
-            SetThreadExecutionState(ES_CONTINUOUS);
+            if(powerRequest != INVALID_HANDLE_VALUE)
+            {
+                PowerClearRequest(powerRequest, PowerRequestDisplayRequired);
+                PowerClearRequest(powerRequest, PowerRequestSystemRequired);
+                CloseHandle(powerRequest);
+                powerRequest = INVALID_HANDLE_VALUE;
+            }
+            else
+            {
+                SetThreadExecutionState(ES_CONTINUOUS);
+            }
             sleepBlocked = false;
         }
         if(priorityRaised)
@@ -283,7 +317,8 @@ bool Ps5LinkSetSystemVolume(int percent)
 
 bool Ps5LinkOnline()
 {
-    return QCoreApplication::instance()->property("ps5linkOnline").toBool();
+    auto *app = QCoreApplication::instance();
+    return app && app->property("ps5linkOnline").toBool();
 }
 
 bool Ps5LinkIsSecretProtected(const QVariant &value)
@@ -484,8 +519,24 @@ int Ps5LinkReplay(QGuiApplication &app, const QString &fileName, bool fullscreen
     {
         const auto *parameters = input->streams[stream]->codecpar;
         dx12->prepareVideo(QSize(parameters->width, parameters->height), fullscreen);
+        const QString previewEnv = qEnvironmentVariable("PS5LINK_REPLAY_PREVIEW").trimmed().toLower();
+        if(previewEnv == QLatin1String("dock"))
+            dx12->setReplayPreview(1, 0);
+        else if(previewEnv == QLatin1String("hud"))
+            dx12->setReplayPreview(3, 0);
+        else if(previewEnv == QLatin1String("menu"))
+            dx12->setReplayPreview(2, 0);
+        else if(previewEnv == QLatin1String("menu-video"))
+            dx12->setReplayPreview(2, 1);
+        else if(previewEnv == QLatin1String("menu-color"))
+            dx12->setReplayPreview(2, 2);
+        else if(previewEnv == QLatin1String("menu-controls"))
+            dx12->setReplayPreview(2, 3);
+        else if(app.property("ps5linkReplayMenu").toBool())
+            dx12->openSettings();
         QObject::connect(dx12.get(), &Dx12ReplayWindow::firstFramePresented, &window, [&] {
-            if(app.property("ps5linkReplayMenu").toBool())
+            if(previewEnv.isEmpty() && app.property("ps5linkReplayMenu").toBool()
+                && !dx12->property("ps5linkDx12MenuOpen").toBool())
                 dx12->openSettings();
         }, Qt::QueuedConnection);
         QObject::connect(dx12.get(), &Dx12ReplayWindow::renderingFailed, &window, [&](const QString &failure) {

@@ -30,7 +30,7 @@ void PSNAccountID::handleAccessTokenResponse(const QString& url, const QJsonDocu
     QDateTime expiry = currentTime.addSecs(secondsLeft);
     QString access_token_expiry = expiry.toString(settings->GetTimeFormat());
     if (access_token.isEmpty() || refresh_token.isEmpty() || secondsLeft <= 0) {
-        emit AccountIDError({}, tr("PSN did not return valid credentials."));
+        emit AccountIDError(tr("PSN did not return valid credentials."));
         emit Finished();
         return;
     }
@@ -51,7 +51,7 @@ void PSNAccountID::handUserIDResponse(const QString& url, const QJsonDocument& j
     bool valid = false;
     const quint64 account = user_id.toULongLong(&valid);
     if (!valid) {
-        emit AccountIDError({}, tr("PSN did not return a valid account ID."));
+        emit AccountIDError(tr("PSN did not return a valid account ID."));
         emit Finished();
         return;
     }
@@ -70,6 +70,13 @@ void PSNAccountID::handUserIDResponse(const QString& url, const QJsonDocument& j
 }
 
 void PSNAccountID::handleErrorResponse(const QString& url, const QString& error, const QNetworkReply::NetworkError& err) {
-    emit AccountIDError(url, error);
+    Q_UNUSED(url)
+#ifdef PS5LINK_BUILD
+    Q_UNUSED(error)
+    emit AccountIDError(tr("PSN token request failed (network error %1).").arg(static_cast<int>(err)));
+#else
+    Q_UNUSED(err)
+    emit AccountIDError(error);
+#endif
     emit Finished();
 }

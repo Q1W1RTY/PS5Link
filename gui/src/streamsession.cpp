@@ -799,7 +799,7 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	Ps5LinkBeginStreamBoost(boostOpts);
 #if defined(PS5LINK_BUILD) && defined(_WIN32)
 	Ds5BtManager::instance().setMicAudioCallback([this](const int16_t *mono48k, const int16_t *stereo48k, size_t frames) {
-		if(!mic_active.loadRelaxed() || muted || audio_in != 0)
+		if(!mic_active.loadRelaxed() || muted.loadRelaxed() || audio_in.loadRelaxed() != 0)
 			return;
 #if CHIAKI_GUI_ENABLE_SPEEX
 		if(speech_processing_enabled)
@@ -998,8 +998,7 @@ void StreamSession::ToggleMute()
 	else
 		muted = true;
 #if defined(PS5LINK_BUILD) && defined(_WIN32)
-	if(Ds5BtManager::instance().isConnected())
-		Ds5BtManager::instance().setMicState(!muted && mic_connected, muted);
+	Ds5BtManager::instance().setMicState(!muted && mic_connected, muted);
 #endif
 	QMetaObject::invokeMethod(this, [this]() {
 		for(auto controller : controllers)
@@ -1377,10 +1376,11 @@ void StreamSession::HandleDpadTouchEvent(ChiakiControllerState *state, bool plac
 void StreamSession::UpdateGamepads()
 {
 #if CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
+	const auto available_controllers = ControllerManager::GetInstance()->GetAvailableControllers();
 	for(auto controller_id : controllers.keys())
 	{
 		auto controller = controllers[controller_id];
-		if(!controller->IsConnected())
+		if(!controller->IsConnected() || !available_controllers.contains(controller_id))
 		{
 			CHIAKI_LOGI(log.GetChiakiLog(), "Controller %d disconnected", controller->GetDeviceID());
 			controllers.remove(controller_id);
@@ -1396,7 +1396,6 @@ void StreamSession::UpdateGamepads()
 		}
 	}
 
-	const auto available_controllers = ControllerManager::GetInstance()->GetAvailableControllers();
 	for(auto controller_id : available_controllers)
 	{
 		if(!controllers.contains(controller_id))

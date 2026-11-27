@@ -1244,7 +1244,7 @@ DialogView {
                         Layout.minimumWidth: 0
                         Layout.maximumWidth: streamGrid.fieldWidth
                         from: 2
-                        to: 100
+                        to: 150
                         stepSize: 1
                         value: Chiaki.settings.bitrateLocalPS4 / 1000 ? (Chiaki.settings.bitrateLocalPS4 / 1000) : bitrate
                         onMoved: Chiaki.settings.bitrateLocalPS4 = value * 1000;
@@ -1282,7 +1282,7 @@ DialogView {
                         Layout.minimumWidth: 0
                         Layout.maximumWidth: streamGrid.fieldWidth
                         from: 2
-                        to: 100
+                        to: 150
                         stepSize: 1
                         value: Chiaki.settings.bitrateRemotePS4 / 1000 ? (Chiaki.settings.bitrateRemotePS4 / 1000) : bitrate
                         onMoved: Chiaki.settings.bitrateRemotePS4 = value * 1000;
@@ -1322,7 +1322,7 @@ DialogView {
                         Layout.minimumWidth: 0
                         Layout.maximumWidth: streamGrid.fieldWidth
                         from: 2
-                        to: 100
+                        to: 150
                         stepSize: 1
                         value: Chiaki.settings.bitrateLocalPS5 / 1000 ? (Chiaki.settings.bitrateLocalPS5 / 1000) : bitrate
                         onMoved: Chiaki.settings.bitrateLocalPS5 = value * 1000;
@@ -1362,7 +1362,7 @@ DialogView {
                         Layout.minimumWidth: 0
                         Layout.maximumWidth: streamGrid.fieldWidth
                         from: 2
-                        to: 100
+                        to: 150
                         stepSize: 1
                         value: Chiaki.settings.bitrateRemotePS5 / 1000 ? (Chiaki.settings.bitrateRemotePS5 / 1000) : bitrate
                         onMoved: Chiaki.settings.bitrateRemotePS5 = value * 1000;
@@ -1401,7 +1401,7 @@ DialogView {
                         Layout.preferredWidth: streamGrid.fieldWidth
                         Layout.minimumWidth: 0
                         Layout.maximumWidth: streamGrid.fieldWidth
-                        property bool openGlBackend: Chiaki.settings.rendererBackend === 1
+                        property bool openGlBackend: Chiaki.settings.rendererBackend === 1 && !Chiaki.settings.dx12Enabled
 						model: openGlBackend ? [qsTr("H264"), qsTr("H265 (Default)")] : [qsTr("H264"), qsTr("H265 (Default)"), qsTr("H265 HDR")]
                         currentIndex: Chiaki.settings.codecLocalPS5
                         onActivated: (index) => Chiaki.settings.codecLocalPS5 = index
@@ -1429,7 +1429,7 @@ DialogView {
                             Layout.preferredWidth: streamGrid.fieldWidth
                         Layout.minimumWidth: 0
                         Layout.maximumWidth: streamGrid.fieldWidth
-                        property bool openGlBackend: Chiaki.settings.rendererBackend === 1
+                        property bool openGlBackend: Chiaki.settings.rendererBackend === 1 && !Chiaki.settings.dx12Enabled
                         model: openGlBackend ? [qsTr("H264"), qsTr("H265 (Default)")] : [qsTr("H264"), qsTr("H265 (Default)"), qsTr("H265 HDR")]
                             currentIndex: Chiaki.settings.codecRemotePS5
                             onActivated: (index) => Chiaki.settings.codecRemotePS5 = index
@@ -2331,6 +2331,7 @@ DialogView {
                             label: qsTr("Console Lightbar Colors:")
                             visible: Chiaki.settings.lightbarMode !== undefined
                             SettingsPicker {
+                                id: lightbarPicker
                                 Accessible.name: qsTr("Console Lightbar Colors:")
                                 model: [qsTr("Off"), qsTr("Controller Only"), qsTr("Overlay HUD Only"), qsTr("Controller + Overlay")]
                                 currentIndex: Chiaki.settings.lightbarMode ?? 1
@@ -2346,7 +2347,7 @@ DialogView {
                                 checked: Chiaki.settings.dpadTouchEnabled
                                 onToggled: Chiaki.settings.dpadTouchEnabled = !Chiaki.settings.dpadTouchEnabled
                                 KeyNavigation.priority: KeyNavigation.BeforeItem
-                                KeyNavigation.up: backgroundController
+                                KeyNavigation.up: lightbarPicker.visible ? lightbarPicker : backgroundController
                                 KeyNavigation.left: dpadTouch
                                 KeyNavigation.right: dpadTouch
                                 KeyNavigation.down: {
@@ -2773,6 +2774,7 @@ DialogView {
                     }
 
                     C.CheckBox {
+                        visible: typeof Chiaki.settings.resetVideoSettings !== "function"
                         text: qsTr("Sanitize Logs (checked)")
                         checked: Chiaki.settings.logSanitize
                         onToggled: Chiaki.settings.logSanitize = checked

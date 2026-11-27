@@ -45,7 +45,7 @@ public:
 
 signals:
     void AccountIDResponse(QString accountId);
-    void AccountIDError(const QString& url, const QString& error);
+    void AccountIDError(const QString& error);
     void Finished();
 
 private:

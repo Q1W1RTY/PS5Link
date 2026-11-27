@@ -272,6 +272,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 	takion->postponed_packets_count = 0;
 	takion->enable_dualsense = info->enable_dualsense;
 	takion->bypass_video_reorder_queue = info->bypass_video_reorder_queue;
+	takion->qos_flow_id = 0;
 
 	CHIAKI_LOGI(takion->log, "Takion connecting (version %u)", (unsigned int)info->protocol_version);
 	bool mac_dontfrag = true;
@@ -465,7 +466,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 		}
 	}
 
-	chiaki_socket_apply_qos(takion->sock, takion->log);
+	takion->qos_flow_id = chiaki_socket_apply_qos(takion->sock, takion->log);
 	err = chiaki_thread_create(&takion->thread, takion_thread_func, takion);
 
 	chiaki_thread_set_name(&takion->thread, "Chiaki Takion");
@@ -1246,6 +1247,11 @@ beach:
 		ChiakiTakionEvent event = { 0 };
 		event.type = CHIAKI_TAKION_EVENT_TYPE_DISCONNECT;
 		takion->cb(&event, takion->cb_user);
+	}
+	if(!CHIAKI_SOCKET_IS_INVALID(takion->sock) && takion->qos_flow_id)
+	{
+		chiaki_socket_remove_qos(takion->sock, takion->qos_flow_id);
+		takion->qos_flow_id = 0;
 	}
 	if(takion->close_socket)
 	{

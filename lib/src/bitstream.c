@@ -370,6 +370,17 @@ static bool slice_set_reference_frame_h265(ChiakiBitstream *bitstream, uint8_t *
 		if(target == num_negative_pics || active_count != 1)
 			return false;
 
+		uint8_t saved_bytes[16];
+		size_t min_byte = size, max_byte = 0;
+		for(unsigned i=0; i<num_negative_pics; i++)
+		{
+			const size_t byte_idx = flag_bits[i] / 8;
+			saved_bytes[i] = data[byte_idx];
+			if(byte_idx < min_byte)
+				min_byte = byte_idx;
+			if(byte_idx > max_byte)
+				max_byte = byte_idx;
+		}
 		for(unsigned i=0; i<num_negative_pics; i++)
 		{
 			const size_t bit = flag_bits[i];
@@ -378,6 +389,18 @@ static bool slice_set_reference_frame_h265(ChiakiBitstream *bitstream, uint8_t *
 				data[bit / 8] |= mask;
 			else
 				data[bit / 8] &= (uint8_t)~mask;
+		}
+		// Reject the in-place edit if it would introduce an unescaped 00 00 00..03 byte sequence.
+		const size_t check_start = min_byte >= 2 ? min_byte - 2 : 0;
+		const size_t check_end = (max_byte + 2 < size) ? max_byte + 2 : (size > 0 ? size - 1 : 0);
+		for(size_t b = check_start; b + 2 <= check_end; ++b)
+		{
+			if(data[b] == 0x00 && data[b + 1] == 0x00 && data[b + 2] <= 0x03)
+			{
+				for(unsigned i = num_negative_pics; i-- > 0;)
+					data[flag_bits[i] / 8] = saved_bytes[i];
+				return false;
+			}
 		}
 		return true;
 	}

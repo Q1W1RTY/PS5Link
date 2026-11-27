@@ -71,6 +71,14 @@ class QmlMainWindow : public QWindow
     Q_PROPERTY(bool rtxVsrActive READ rtxVsrActive NOTIFY rtxVsrActiveChanged)
     Q_PROPERTY(double queueDepthAverage READ queueDepthAverage NOTIFY queueDepthAverageChanged)
     Q_PROPERTY(double pendingFrameAge READ pendingFrameAge NOTIFY pendingFrameAgeChanged)
+#ifdef PS5LINK_BUILD
+    Q_PROPERTY(bool bottomDockHovered READ bottomDockHovered NOTIFY bottomDockHoveredChanged)
+    Q_PROPERTY(double liveFps READ liveFps NOTIFY liveTelemetryChanged)
+    Q_PROPERTY(bool gamepadConnected READ gamepadConnected NOTIFY liveTelemetryChanged)
+    Q_PROPERTY(int gamepadBattery READ gamepadBattery NOTIFY liveTelemetryChanged)
+    Q_PROPERTY(bool gamepadCharging READ gamepadCharging NOTIFY liveTelemetryChanged)
+    Q_PROPERTY(bool gamepadFull READ gamepadFull NOTIFY liveTelemetryChanged)
+#endif
 
 public:
     enum class UpdateRequestReason {
@@ -142,6 +150,18 @@ public:
     bool wasMaximized() const { return was_maximized; };
     bool isWindowAdjustable() const { return is_window_adjustable; }
     void setWindowAdjustable(bool adjustable) { is_window_adjustable = adjustable; }
+    bool shouldExitOnStreamExit() const { return exit_on_stream_exit; }
+#ifdef PS5LINK_BUILD
+    bool bottomDockHovered() const { return bottom_dock_hovered; }
+    double liveFps() const { return live_fps; }
+    bool gamepadConnected() const { return gamepad_connected; }
+    int gamepadBattery() const { return gamepad_battery; }
+    bool gamepadCharging() const { return gamepad_charging; }
+    bool gamepadFull() const { return gamepad_full; }
+    Q_INVOKABLE void setBottomDockHovered(bool hovered);
+    Q_INVOKABLE void toggleFullscreenWindow();
+    void refreshRtxVsrQualityFromSettings();
+#endif
 
     void fullscreenTime();
     void normalTime();
@@ -201,6 +221,10 @@ signals:
     void pendingFrameAgeChanged();
     void loadingTransitionCompleteChanged();
     void statsOverlayActiveChanged();
+#ifdef PS5LINK_BUILD
+    void bottomDockHoveredChanged();
+    void liveTelemetryChanged();
+#endif
 
 private:
     friend class BufferedPlaybackPacerThread;
@@ -336,9 +360,22 @@ private:
     int dropped_frames = 0;
     bool is_window_adjustable = false;
     bool is_stream_window_adjustable = false;
+    bool exit_on_stream_exit = false;
+    bool had_active_session = false;
     QAtomicInteger<int> dropped_frames_current = 0;
 #ifdef PS5LINK_BUILD
     QAtomicInteger<quint64> submitted_frames{0};
+    bool bottom_dock_hovered = false;
+    QTimer *dock_hide_timer = nullptr;
+    QTimer *live_telemetry_timer = nullptr;
+    quint64 prev_telemetry_frames = 0;
+    qint64 prev_telemetry_ms = 0;
+    double live_fps = 0.0;
+    bool gamepad_connected = false;
+    int gamepad_battery = -1;
+    bool gamepad_charging = false;
+    bool gamepad_full = false;
+    void refreshLiveTelemetry();
 #endif
     bool going_full = false;
     VideoMode video_mode = VideoMode::Normal;

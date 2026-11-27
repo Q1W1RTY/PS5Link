@@ -42,6 +42,12 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; Flags: unchecked
 
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\LICENSES\MSYS2"
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{localappdata}\PS5Link\Updates"
+
 [Files]
 Source: "{#PackageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
@@ -61,9 +67,15 @@ function WaitForSingleObject(Handle: THandle; Milliseconds: Cardinal): Cardinal;
 function CloseHandle(Handle: THandle): Boolean;
   external 'CloseHandle@kernel32.dll stdcall';
 
-function UpdateProcessId: Integer;
+function UpdateProcessId: Cardinal;
+var
+  Parsed: Int64;
 begin
-  Result := StrToIntDef(ExpandConstant('{param:PS5LINKUPDATEPID|0}'), 0);
+  Parsed := StrToInt64Def(ExpandConstant('{param:PS5LINKUPDATEPID|0}'), 0);
+  if (Parsed > 0) and (Parsed <= $FFFFFFFF) then
+    Result := Cardinal(Parsed)
+  else
+    Result := 0;
 end;
 
 function IsAutomaticUpdate: Boolean;

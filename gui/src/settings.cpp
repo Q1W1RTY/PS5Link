@@ -368,6 +368,8 @@ int Settings::RunLauncherIdleMonitor(const QString &profile, unsigned long paren
 
 int Settings::RunLauncherSettingsCommand(const QString &profile, bool write)
 {
+    if(!IsValidProfileName(profile))
+        return 2;
     Settings active(profile, nullptr, false);
     auto &settings = active.settings;
     static constexpr int heights[] = {0, 1, 1800, 2160};
@@ -517,7 +519,7 @@ int Settings::RunLauncherSettingsCommand(const QString &profile, bool write)
                 profiles.append(name);
         const auto json = QJsonDocument(QJsonObject{{"Profile", profile}, {"Values", values}, {"Missing", missing},
             {"Advanced", advanced}, {"Consoles", consoles}, {"PreferredConsole", preferredConsole}, {"Profiles", profiles},
-            {"PsnLinked", !settings.value("settings/psn_refresh_token").toByteArray().isEmpty()}}).toJson(QJsonDocument::Compact);
+            {"PsnLinked", !active.GetPsnRefreshToken().isEmpty() && !active.GetPsnAccountId().isEmpty()}}).toJson(QJsonDocument::Compact);
         return std::fwrite(json.constData(), 1, json.size(), stdout) == size_t(json.size()) && std::fflush(stdout) == 0 ? 0 : 1;
     }
 
@@ -610,6 +612,8 @@ int Settings::RunLauncherSettingsCommand(const QString &profile, bool write)
 }
 int Settings::RunLauncherProfileCommand(const QString &profile, const QString &operation, const QString &value)
 {
+    if(!IsValidProfileName(profile))
+        return 2;
     Settings active(profile, nullptr, false);
     active.default_settings.setFallbacksEnabled(false);
     if(operation != "export" && !QDir().mkpath(QFileInfo(active.default_settings.fileName()).absolutePath()))
@@ -667,6 +671,8 @@ int Settings::RunLauncherProfileCommand(const QString &profile, const QString &o
 
 int Settings::RunLauncherSetupCommand(const QString &profile, const QString &operation)
 {
+    if(!IsValidProfileName(profile))
+        return 2;
     if(chiaki_lib_init() != CHIAKI_ERR_SUCCESS)
         return 1;
 
@@ -736,6 +742,7 @@ int Settings::RunLauncherSetupCommand(const QString &profile, const QString &ope
         const auto access = Ps5LinkEncodeSecret(credentials.accessToken);
         const auto refresh = Ps5LinkEncodeSecret(credentials.refreshToken);
         const auto account = Ps5LinkEncodeSecret(credentials.accountId);
+        active.default_settings.sync();
         if(access.isEmpty() || refresh.isEmpty() || account.isEmpty() || active.GetCurrentProfile() != profile)
             return 1;
         active.settings.setValue("settings/psn_auth_token", access);
@@ -790,6 +797,7 @@ int Settings::RunLauncherSetupCommand(const QString &profile, const QString &ope
 #ifdef _WIN32
     CloseHandle(registration.thread.thread);
 #endif
+    active.default_settings.sync();
     if(!result.host || active.GetCurrentProfile() != profile)
         return 6;
 
@@ -968,6 +976,11 @@ bool Settings::ImportSettings(QString filepath, const QString &destinationProfil
 	};
 
 	QString profile = destinationProfile.isEmpty() ? settings_backup.value("settings/this_profile").toString() : destinationProfile;
+	if(!IsValidProfileName(profile))
+	{
+		qWarning("PS5Link ImportSettings: rejected invalid profile name.");
+		return false;
+	}
 
 	if(profile.isEmpty())
 	{
@@ -1223,9 +1236,9 @@ static const QMap<ChiakiCodec, QString> codecs = {
 static const ChiakiCodec codec_default_ps5 = CHIAKI_CODEC_H265;
 static const ChiakiCodec codec_default_ps4 = CHIAKI_CODEC_H264;
 
-static ChiakiCodec clampCodecForBackend(RenderBackend backend, ChiakiCodec codec)
+static ChiakiCodec clampCodecForBackend(RenderBackend backend, ChiakiCodec codec, bool dx12_enabled = false)
 {
-	if (backend == RenderBackend::OpenGL && codec == CHIAKI_CODEC_H265_HDR)
+	if (backend == RenderBackend::OpenGL && !dx12_enabled && codec == CHIAKI_CODEC_H265_HDR)
 		return CHIAKI_CODEC_H265;
 	return codec;
 }
@@ -1241,14 +1254,22 @@ ChiakiCodec Settings::GetCodecLocalPS5() const
 {
 	auto v = settings.value("settings/codec_local_ps5", codecs[codec_default_ps5]).toString();
 	auto codec = codecs.key(v, codec_default_ps5);
+#ifdef PS5LINK_BUILD
+	return clampCodecForBackend(GetRenderBackend(), codec, GetDx12Enabled());
+#else
 	return clampCodecForBackend(GetRenderBackend(), codec);
+#endif
 }
 
 ChiakiCodec Settings::GetCodecRemotePS5() const
 {
 	auto v = settings.value("settings/codec_remote_ps5", codecs[codec_default_ps5]).toString();
 	auto codec = codecs.key(v, codec_default_ps5);
+#ifdef PS5LINK_BUILD
+	return clampCodecForBackend(GetRenderBackend(), codec, GetDx12Enabled());
+#else
 	return clampCodecForBackend(GetRenderBackend(), codec);
+#endif
 }
 
 void Settings::SetCodecPS4(ChiakiCodec codec)
@@ -2979,6 +3000,67 @@ void Settings::SaveControllerMappings(QSettings *qsettings)
 	qsettings->endArray();
 }
 
+bool Settings::IsValidProfileName(const QString &name)
+{
+	if(name.isEmpty())
+		return true;
+	if(name.size() > 120)
+		return false;
+	if(name == QLatin1String(".") || name == QLatin1String("..") || name.contains(QLatin1String("..")))
+		return false;
+	if(name.startsWith(QLatin1Char(' ')) || name.endsWith(QLatin1Char(' '))
+		|| name.startsWith(QLatin1Char('.')) || name.endsWith(QLatin1Char('.')))
+		return false;
+	for(const QChar ch : name)
+	{
+		if(ch.unicode() < 0x20u || ch == QLatin1Char('/') || ch == QLatin1Char('\\')
+			|| ch == QLatin1Char(':') || ch == QLatin1Char('*') || ch == QLatin1Char('?')
+			|| ch == QLatin1Char('"') || ch == QLatin1Char('<') || ch == QLatin1Char('>')
+			|| ch == QLatin1Char('|'))
+			return false;
+	}
+	return true;
+}
+
+QString Settings::GetChiakiControllerButtonKey(int button)
+{
+	switch(button)
+	{
+		case CHIAKI_CONTROLLER_BUTTON_CROSS      : return QStringLiteral("cross");
+		case CHIAKI_CONTROLLER_BUTTON_MOON       : return QStringLiteral("moon");
+		case CHIAKI_CONTROLLER_BUTTON_BOX        : return QStringLiteral("box");
+		case CHIAKI_CONTROLLER_BUTTON_PYRAMID    : return QStringLiteral("pyramid");
+		case CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT  : return QStringLiteral("d-pad_left");
+		case CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT : return QStringLiteral("d-pad_right");
+		case CHIAKI_CONTROLLER_BUTTON_DPAD_UP    : return QStringLiteral("d-pad_up");
+		case CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN  : return QStringLiteral("d-pad_down");
+		case CHIAKI_CONTROLLER_BUTTON_L1         : return QStringLiteral("l1");
+		case CHIAKI_CONTROLLER_BUTTON_R1         : return QStringLiteral("r1");
+		case CHIAKI_CONTROLLER_BUTTON_L3         : return QStringLiteral("l3");
+		case CHIAKI_CONTROLLER_BUTTON_R3         : return QStringLiteral("r3");
+		case CHIAKI_CONTROLLER_BUTTON_OPTIONS    : return QStringLiteral("options");
+		case CHIAKI_CONTROLLER_BUTTON_SHARE      : return QStringLiteral("share");
+		case CHIAKI_CONTROLLER_BUTTON_TOUCHPAD   : return QStringLiteral("touchpad");
+		case CHIAKI_CONTROLLER_BUTTON_PS         : return QStringLiteral("ps");
+		case CHIAKI_CONTROLLER_ANALOG_BUTTON_L2  : return QStringLiteral("l2");
+		case CHIAKI_CONTROLLER_ANALOG_BUTTON_R2  : return QStringLiteral("r2");
+		case static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_X_UP)    : return QStringLiteral("left_stick_right");
+		case static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_Y_UP)    : return QStringLiteral("left_stick_up");
+		case static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_X_UP)   : return QStringLiteral("right_stick_right");
+		case static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_Y_UP)   : return QStringLiteral("right_stick_up");
+		case static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_X_DOWN)  : return QStringLiteral("left_stick_left");
+		case static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_Y_DOWN)  : return QStringLiteral("left_stick_down");
+		case static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_X_DOWN) : return QStringLiteral("right_stick_left");
+		case static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_Y_DOWN) : return QStringLiteral("right_stick_down");
+		case static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_X)       : return QStringLiteral("left_stick_x");
+		case static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_Y)       : return QStringLiteral("left_stick_y");
+		case static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_X)      : return QStringLiteral("right_stick_x");
+		case static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_Y)      : return QStringLiteral("right_stick_y");
+		case static_cast<int>(ControllerButtonExt::MISC1)                     : return QStringLiteral("mic");
+		default: return QStringLiteral("unknown");
+	}
+}
+
 QString Settings::GetChiakiControllerButtonName(int button)
 {
 	switch(button)
@@ -3020,8 +3102,11 @@ QString Settings::GetChiakiControllerButtonName(int button)
 
 void Settings::SetControllerButtonMapping(int chiaki_button, Qt::Key key)
 {
-	auto button_name = GetChiakiControllerButtonName(chiaki_button).replace(' ', '_').toLower();
-	settings.setValue("keymap/" + button_name, QKeySequence(key).toString());
+	auto button_key = GetChiakiControllerButtonKey(chiaki_button);
+	settings.setValue("keymap/" + button_key, QKeySequence(key).toString());
+	const auto legacy_key = GetChiakiControllerButtonName(chiaki_button).replace(' ', '_').toLower();
+	if(legacy_key != button_key && settings.contains("keymap/" + legacy_key))
+		settings.remove("keymap/" + legacy_key);
 }
 
 QMap<int, Qt::Key> Settings::GetControllerMapping()
@@ -3061,9 +3146,15 @@ QMap<int, Qt::Key> Settings::GetControllerMapping()
 	auto chiaki_buttons = result.keys();
 	for(auto chiaki_button : chiaki_buttons)
 	{
-		auto button_name = GetChiakiControllerButtonName(chiaki_button).replace(' ', '_').toLower();
-		if(settings.contains("keymap/" + button_name))
-			result[static_cast<int>(chiaki_button)] = QKeySequence(settings.value("keymap/" + button_name).toString())[0].key();
+		const auto button_key = GetChiakiControllerButtonKey(chiaki_button);
+		if(settings.contains("keymap/" + button_key))
+			result[static_cast<int>(chiaki_button)] = QKeySequence(settings.value("keymap/" + button_key).toString())[0].key();
+		else
+		{
+			const auto legacy_key = GetChiakiControllerButtonName(chiaki_button).replace(' ', '_').toLower();
+			if(legacy_key != button_key && settings.contains("keymap/" + legacy_key))
+				result[static_cast<int>(chiaki_button)] = QKeySequence(settings.value("keymap/" + legacy_key).toString())[0].key();
+		}
 	}
 
 	return result;
@@ -3106,9 +3197,12 @@ void Settings::ClearKeyMapping()
 	auto chiaki_buttons = result.keys();
 	for(auto chiaki_button : chiaki_buttons)
 	{
-		auto button_name = GetChiakiControllerButtonName(chiaki_button).replace(' ', '_').toLower();
-		if(settings.contains("keymap/" + button_name))
-			settings.remove("keymap/" + button_name);
+		const auto button_key = GetChiakiControllerButtonKey(chiaki_button);
+		if(settings.contains("keymap/" + button_key))
+			settings.remove("keymap/" + button_key);
+		const auto legacy_key = GetChiakiControllerButtonName(chiaki_button).replace(' ', '_').toLower();
+		if(legacy_key != button_key && settings.contains("keymap/" + legacy_key))
+			settings.remove("keymap/" + legacy_key);
 	}
 }
 
@@ -3161,6 +3255,7 @@ void Settings::ResetVideoSettings()
 {
 	const QStringList keys = {
 		"settings/rtx_vsr_quality", "settings/dx12_enabled", "settings/dx12_frame_generation",
+		"settings/dx12_interpolation",
 		"settings/dx12_dlss_sr", "settings/dx12_fsr", "settings/dx12_present_mode",
 		"settings/dx12_aspect", "settings/dx12_ambient_style", "settings/dx12_upscale_height",
 		"settings/dx12_sharpness", "settings/dx12_error_concealment", "settings/dx12_window_mode",
@@ -3179,6 +3274,7 @@ void Settings::ResetStreamSettings()
 		"settings/wifi_streaming_mode", "settings/prevent_display_sleep", "settings/performance_mode",
 		"settings/controller_polling_ms", "settings/gamepad_quit_hotkey",
 		"settings/video_reorder_window_ms", "settings/mute_pc_audio_with_dualsense_headphones",
+		"settings/bt_speaker_audio", "settings/start_mic_unmuted",
 		"settings/gamepad_idle_enabled", "settings/gamepad_idle_desktop", "settings/gamepad_idle_stream",
 		"settings/gamepad_idle_keep_charging",
 		"settings/enable_rumble", "settings/enable_adaptive_triggers", "settings/enable_gyro_reset",

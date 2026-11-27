@@ -160,6 +160,9 @@ ControllerManager::ControllerManager(QObject *parent)
 	if(SDL_Init(SDL_INIT_GAMECONTROLLER) < 0)
 		return;
 
+#if defined(PS5LINK_BUILD) && defined(_WIN32)
+	Ds5BtManager::instance().startDiscovery(true);
+#endif
 #ifdef PS5LINK_BUILD
 	const QString dataDir = QFileInfo(QSettings(QSettings::IniFormat, QSettings::UserScope,
 		QCoreApplication::organizationName(), QCoreApplication::applicationName()).fileName()).absolutePath();
@@ -1089,7 +1092,8 @@ void Controller::SetDualsenseMic(bool on)
 	if(is_native_bt)
 	{
 		// Note: in Chiaki/PS5Link, SetDualsenseMic(muted) passes true when muted (orange LED on).
-		Ds5BtManager::instance().setMicState(Ds5BtManager::instance().isMicStreamActive(), on);
+		// Do not clobber desiredMicActive here; StreamSession::ToggleMute manages streamActive.
+		Ds5BtManager::instance().setMicMuted(on);
 		return;
 	}
 #endif

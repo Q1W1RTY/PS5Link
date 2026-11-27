@@ -108,13 +108,21 @@ struct Generator
 constexpr auto searchFlags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
 }
 
-extern "C" __declspec(dllexport) void *Ps5LinkDlssFgCreate(ID3D12Device *device,
+extern "C" __declspec(dllexport) void *Ps5LinkDlssFgCreateEx(ID3D12Device *device,
     ID3D12GraphicsCommandList *commands, const wchar_t *directory, bool useSm86,
-    unsigned width, unsigned height, int *status) noexcept
+    unsigned width, unsigned height, bool shutdownDeviceOnFail, int *status) noexcept
 {
+    int localStatus = NVSDK_NGX_Result_Fail;
+    int &outStatus = status ? *status : localStatus;
     try
     {
+        if(!device || !commands || !directory || width == 0 || height == 0)
+        {
+            outStatus = NVSDK_NGX_Result_FAIL_InvalidParameter;
+            return nullptr;
+        }
         auto generator = std::make_unique<Generator>();
+        generator->shutdownDevice = shutdownDeviceOnFail;
         const std::filesystem::path path(directory);
         if(useSm86)
         {
@@ -123,24 +131,24 @@ extern "C" __declspec(dllexport) void *Ps5LinkDlssFgCreate(ID3D12Device *device,
             if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, proxyPath.c_str(), &proxy)
                 && !LoadLibraryExW(proxyPath.c_str(), nullptr, searchFlags))
             {
-                *status = HRESULT_FROM_WIN32(GetLastError());
+                outStatus = HRESULT_FROM_WIN32(GetLastError());
                 return nullptr;
             }
         }
         generator->module = LoadLibraryExW((path / L"nvngx_dlssg.dll").c_str(), nullptr, searchFlags);
         if(!generator->module)
         {
-            *status = HRESULT_FROM_WIN32(GetLastError());
+            outStatus = HRESULT_FROM_WIN32(GetLastError());
             return nullptr;
         }
         const wchar_t *search = path.c_str();
         NVSDK_NGX_FeatureCommonInfo info{};
         info.PathListInfo.Path = &search;
         info.PathListInfo.Length = 1;
-        *status = NVSDK_NGX_D3D12_Init(0x0876232cULL, path.c_str(), device, &info);
-        if(*status != NVSDK_NGX_Result_Success)
+        outStatus = NVSDK_NGX_D3D12_Init(0x0876232cULL, path.c_str(), device, &info);
+        if(outStatus != NVSDK_NGX_Result_Success)
         {
-            std::fprintf(stderr, "DX12 DLSS FG NGX Init returned 0x%08x.\n", unsigned(*status));
+            std::fprintf(stderr, "DX12 DLSS FG NGX Init returned 0x%08x.\n", unsigned(outStatus));
             return nullptr;
         }
         generator->device = device;
@@ -167,16 +175,28 @@ extern "C" __declspec(dllexport) void *Ps5LinkDlssFgCreate(ID3D12Device *device,
             "DLSSG.DynamicResolution", "DLSSG.ColorBuffersHDR"})
             p.Set(key, 0u);
         p.Set("DLSSG.BackbufferFormat", unsigned(DXGI_FORMAT_R8G8B8A8_UNORM));
-        *status = NVSDK_NGX_D3D12_CreateFeature(commands, NVSDK_NGX_Feature_FrameGeneration, &p, &generator->feature);
-        if(*status != NVSDK_NGX_Result_Success)
-            std::fprintf(stderr, "DX12 DLSS FG NGX CreateFeature returned 0x%08x.\n", unsigned(*status));
-        return *status == NVSDK_NGX_Result_Success ? generator.release() : nullptr;
+        outStatus = NVSDK_NGX_D3D12_CreateFeature(commands, NVSDK_NGX_Feature_FrameGeneration, &p, &generator->feature);
+        if(outStatus != NVSDK_NGX_Result_Success)
+            std::fprintf(stderr, "DX12 DLSS FG NGX CreateFeature returned 0x%08x.\n", unsigned(outStatus));
+        if(outStatus == NVSDK_NGX_Result_Success)
+        {
+            generator->shutdownDevice = true;
+            return generator.release();
+        }
+        return nullptr;
     }
     catch(...)
     {
-        *status = E_FAIL;
+        outStatus = E_FAIL;
         return nullptr;
     }
+}
+
+extern "C" __declspec(dllexport) void *Ps5LinkDlssFgCreate(ID3D12Device *device,
+    ID3D12GraphicsCommandList *commands, const wchar_t *directory, bool useSm86,
+    unsigned width, unsigned height, int *status) noexcept
+{
+    return Ps5LinkDlssFgCreateEx(device, commands, directory, useSm86, width, height, true, status);
 }
 
 extern "C" __declspec(dllexport) int Ps5LinkDlssFgEvaluate(void *opaque, ID3D12GraphicsCommandList *commands,
@@ -186,7 +206,7 @@ extern "C" __declspec(dllexport) int Ps5LinkDlssFgEvaluate(void *opaque, ID3D12G
 {
     try
     {
-        if(!opaque)
+        if(!opaque || !commands || !queue || !allocator || !current || !motion || !depth || !generated || !real)
             return NVSDK_NGX_Result_FAIL_InvalidParameter;
         auto &generator = *static_cast<Generator *>(opaque);
         generator.resource("DLSSG.Backbuffer", current);

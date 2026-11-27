@@ -113,8 +113,8 @@ FocusScope {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
         anchors.bottomMargin: Math.min(14, parent.height / 16)
-        width: Math.max(1, Math.min(540, parent.width - 24))
-        height: Math.min(parent.height - anchors.bottomMargin, content.implicitHeight + 30)
+        width: Math.max(1, Math.min(860, parent.width - 28))
+        height: Math.min(parent.height - anchors.bottomMargin, Math.min(340, content.implicitHeight + 28))
         spacing: 0
 
         ScrollView {
@@ -145,33 +145,46 @@ FocusScope {
 
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: 14
+                    spacing: 12
 
-                    ColumnLayout {
-                        spacing: 4
-                        Label { text: "PS5Link"; color: "#FFFFFF"; font.pixelSize: 20; font.weight: Font.DemiBold }
-                        Rectangle {
-                            radius: 10
-                            color: "#2C2C33"
-                            border.color: "#3C3C45"
-                            border.width: 1
-                            implicitHeight: 22
-                            implicitWidth: qspBadgeRow.implicitWidth + 16
-                            RowLayout {
-                                id: qspBadgeRow
-                                anchors.centerIn: parent
-                                spacing: 6
-                                Rectangle {
-                                    width: 6
-                                    height: 6
-                                    radius: 3
-                                    color: panel.session && panel.session.connected ? panel.success : panel.accent
+                    Label { text: "PS5Link"; color: "#FFFFFF"; font.pixelSize: 18; font.weight: Font.DemiBold }
+                    Rectangle {
+                        radius: 12
+                        color: "#24242B"
+                        border.color: "#3A3A44"
+                        border.width: 1
+                        implicitHeight: 26
+                        implicitWidth: qspBadgeRow.implicitWidth + 18
+                        RowLayout {
+                            id: qspBadgeRow
+                            anchors.centerIn: parent
+                            spacing: 7
+                            Rectangle {
+                                width: 7
+                                height: 7
+                                radius: 3.5
+                                color: panel.session && panel.session.connected ? panel.success : panel.accent
+                            }
+                            Label {
+                                text: {
+                                    if (!panel.session)
+                                        return qsTr("Remote Play")
+                                    let parts = [
+                                        Math.round(Chiaki.window.liveFps || 0) + " FPS",
+                                        panel.session.measuredBitrate.toFixed(1) + " Mbps"
+                                    ]
+                                    if (panel.session.rttMs > 0.1)
+                                        parts.push(Math.round(panel.session.rttMs) + " ms")
+                                    if (Chiaki.window.gamepadConnected) {
+                                        const bat = Chiaki.window.gamepadBattery
+                                        parts.push(bat >= 0
+                                            ? (Chiaki.window.gamepadCharging && !Chiaki.window.gamepadFull ? ("PAD " + bat + "%+") : ("PAD " + bat + "%"))
+                                            : (Chiaki.window.gamepadCharging ? "PAD USB" : "PAD"))
+                                    }
+                                    return parts.join("  ·  ")
                                 }
-                                Label {
-                                    text: panel.session && panel.session.connected ? qsTr("Remote Play connected") : qsTr("Remote Play")
-                                    color: "#D0D2D6"
-                                    font.pixelSize: 11
-                                }
+                                color: "#D8DAE0"
+                                font.pixelSize: 12
                             }
                         }
                     }
@@ -180,6 +193,7 @@ FocusScope {
                         id: resumeButton
                         text: qsTr("Resume  (Esc)")
                         primary: true
+                        implicitHeight: 32
                         Layout.alignment: Qt.AlignRight
                         onClicked: panel.dismissed()
                         KeyNavigation.down: aspectBox
@@ -190,7 +204,7 @@ FocusScope {
 
                 GridLayout {
                     Layout.fillWidth: true
-                    columns: 1
+                    columns: shell.width >= 620 ? 2 : 1
                     columnSpacing: 10
                     rowSpacing: 10
 

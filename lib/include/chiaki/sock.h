@@ -37,7 +37,8 @@ typedef int chiaki_socket_t;
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_socket_set_nonblock(chiaki_socket_t sock, bool nonblock);
 CHIAKI_EXPORT void chiaki_socket_bypass_tun(chiaki_socket_t sock, int family, ChiakiLog *log);
-CHIAKI_EXPORT void chiaki_socket_apply_qos(chiaki_socket_t sock, ChiakiLog *log);
+CHIAKI_EXPORT uint32_t chiaki_socket_apply_qos(chiaki_socket_t sock, ChiakiLog *log);
+CHIAKI_EXPORT void chiaki_socket_remove_qos(chiaki_socket_t sock, uint32_t flow_id);
 
 #ifdef __cplusplus
 }

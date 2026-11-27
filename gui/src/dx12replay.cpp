@@ -46,6 +46,7 @@
 extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/frame.h>
+#include <SDL.h>
 }
 
 using Microsoft::WRL::ComPtr;
@@ -177,6 +178,8 @@ Conversion colorConversion(const AVFrame &frame, const D3D12_RESOURCE_DESC &desc
         case AVCHROMA_LOC_CENTER:
             break;
         case AVCHROMA_LOC_LEFT:
+            chromaOffU = 0.5f / texW;
+            break;
         case AVCHROMA_LOC_UNSPECIFIED:
         default:
             chromaOffU = 0.5f / texW;
@@ -267,6 +270,12 @@ struct Dx12ReplayWindow::Pipeline
     std::atomic<bool> showLightbarOverlay{false};
     std::atomic<uint32_t> lightbarRgb{0x000040ffu};
     std::atomic<float> hudPacketLossPct{0.0f};
+    std::atomic<float> hudBitrateMbps{0.0f};
+    std::atomic<float> hudRttMs{0.0f};
+    std::atomic<int> hudGamepadBattery{-1};
+    std::atomic<bool> hudGamepadCharging{false};
+    std::atomic<bool> hudGamepadFull{false};
+    std::atomic<bool> hudGamepadConnected{false};
     std::atomic<uint64_t> hudCorruptFrames{0};
     uint64_t prevCorruptFrames = 0;
     QElapsedTimer lastCorruptTime;
@@ -274,7 +283,10 @@ struct Dx12ReplayWindow::Pipeline
     std::atomic<bool> showMicBtn{true};
     std::atomic<bool> showAspectBtn{true};
     std::atomic<bool> showVolBtns{true};
-    std::atomic<bool> topBarHovered{false};
+    std::atomic<bool> bottomDockHovered{false};
+    std::atomic<bool> menuPopupOpen{false};
+    std::atomic<float> menuLeftPx{0.0f}, menuTopPx{0.0f}, menuRightPx{0.0f}, menuBottomPx{0.0f};
+    float dockAnim = 0.0f;
     int savedVolumeBeforeMute = 100;
     QElapsedTimer volMinusHoldTimer;
     bool volMinusMutedThisHold = false;
@@ -289,6 +301,7 @@ struct Dx12ReplayWindow::Pipeline
     UINT swapchainFlags = 0;
     bool tearingSupported = false;
     bool hasPresentPermit = false;
+    bool swapchainOccluded = false;
     std::atomic<int> presentMode{1};
     std::atomic<bool> showMenu{false}, showHud{false};
     std::atomic<int> overlayVolume{128};
@@ -340,6 +353,7 @@ struct Dx12ReplayWindow::Pipeline
     DXGI_FORMAT videoHistoryFormat = DXGI_FORMAT_UNKNOWN;
     ComPtr<ID3D12Resource> dlssMotionTexture, dlssDepth, dlssGenerated, dlssReal;
     using CreateDlss = void *(*)(ID3D12Device *, ID3D12GraphicsCommandList *, const wchar_t *, bool, unsigned, unsigned, int *);
+    using CreateDlssEx = void *(*)(ID3D12Device *, ID3D12GraphicsCommandList *, const wchar_t *, bool, unsigned, unsigned, bool, int *);
     using EvaluateDlss = int (*)(void *, ID3D12GraphicsCommandList *, ID3D12CommandQueue *, ID3D12CommandAllocator *,
         HANDLE, bool, ID3D12Resource *, ID3D12Resource *, ID3D12Resource *, ID3D12Resource *, ID3D12Resource *);
     using DestroyDlss = void (*)(void *);
@@ -498,8 +512,9 @@ struct Dx12ReplayWindow::Pipeline
         DXGI_ADAPTER_DESC1 adapterDescription{};
         check(adapter->GetDesc1(&adapterDescription), "DXGI adapter description");
         const auto adapterName = QString::fromWCharArray(adapterDescription.Description);
-        useSm86 = adapterDescription.VendorId == 0x10de &&
-            (adapterName.contains("RTX 20") || adapterName.contains("RTX 30") || adapterName.contains("RTX A"));
+        useSm86 = adapterDescription.VendorId == 0x10de
+            && !adapterName.contains("Ada", Qt::CaseInsensitive)
+            && (adapterName.contains("RTX 20") || adapterName.contains("RTX 30") || adapterName.contains("RTX A"));
         std::printf("DX12 adapter: %s\n", adapterName.toUtf8().constData());
 
         D3D12_COMMAND_QUEUE_DESC desc{};
@@ -624,6 +639,11 @@ struct Dx12ReplayWindow::Pipeline
             if(!createVsr || !evaluateVsr || !destroyVsr)
             {
                 std::fprintf(stderr, "DX12 RTX VSR bridge unavailable. Using DX12 shader scaling.\n");
+                createVsr = nullptr;
+                createVsrEx = nullptr;
+                evaluateVsr = nullptr;
+                destroyVsr = nullptr;
+                destroyVsrEx = nullptr;
                 vsrError = unsigned(HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND));
                 vsrQuality = 0;
             }
@@ -697,7 +717,7 @@ struct Dx12ReplayWindow::Pipeline
         state.RTVFormats[0] = highPrecisionFormat;
         check(device->CreateGraphicsPipelineState(&state, IID_PPV_ARGS(&blitPipelineFp16)), "DX12 FP16 blit pipeline");
 
-        ComPtr<ID3DBlob> post;
+        state.RTVFormats[0] = swapchainFormat;
         const QString dataDir = QFileInfo(QSettings(QSettings::IniFormat, QSettings::UserScope,
             QCoreApplication::organizationName(), QCoreApplication::applicationName()).fileName()).absolutePath();
         const QString customShaderPath = QDir(dataDir).filePath(QStringLiteral("Shaders/postprocess.hlsl"));
@@ -709,21 +729,26 @@ struct Dx12ReplayWindow::Pipeline
                 const QByteArray customSrc = shaderFile.readAll();
                 try
                 {
-                    post = compileShader(customSrc.constData(), "postProcess", "ps_5_0");
+                    auto customPost = compileShader(customSrc.constData(), "postProcess", "ps_5_0");
+                    state.PS = {customPost->GetBufferPointer(), customPost->GetBufferSize()};
+                    check(device->CreateGraphicsPipelineState(&state, IID_PPV_ARGS(&postProcessPipeline)),
+                        "DX12 custom post-process pipeline");
                     std::printf("[PS5Link] Loaded custom DX12 post-process shader: %s\n",
                         customShaderPath.toUtf8().constData());
                 }
                 catch(const std::exception &err)
                 {
+                    postProcessPipeline.Reset();
                     std::fprintf(stderr, "[PS5Link] Custom postprocess.hlsl failed (%s). Using built-in CAS.\n", err.what());
                 }
             }
         }
-        if(!post)
-            post = compileShader(dx12_shaders::kPostProcessShader, "postProcess", "ps_5_0");
-        state.PS = {post->GetBufferPointer(), post->GetBufferSize()};
-        state.RTVFormats[0] = swapchainFormat;
-        check(device->CreateGraphicsPipelineState(&state, IID_PPV_ARGS(&postProcessPipeline)), "DX12 post-process pipeline");
+        if(!postProcessPipeline)
+        {
+            auto post = compileShader(dx12_shaders::kPostProcessShader, "postProcess", "ps_5_0");
+            state.PS = {post->GetBufferPointer(), post->GetBufferSize()};
+            check(device->CreateGraphicsPipelineState(&state, IID_PPV_ARGS(&postProcessPipeline)), "DX12 post-process pipeline");
+        }
 
         const auto fsr = compileShader(dx12_shaders::kFsrEasuShader, "fsrEasu", "ps_5_0");
         state.PS = {fsr->GetBufferPointer(), fsr->GetBufferSize()};
@@ -791,15 +816,48 @@ struct Dx12ReplayWindow::Pipeline
         display10Bit = false;
         if(!swapchain)
             return;
-        ComPtr<IDXGIOutput> output;
-        ComPtr<IDXGIOutput6> output6;
-        if(SUCCEEDED(swapchain->GetContainingOutput(&output)) && output && SUCCEEDED(output.As(&output6)))
+        if(factory && !factory->IsCurrent())
         {
-            DXGI_OUTPUT_DESC1 desc1{};
-            if(SUCCEEDED(output6->GetDesc1(&desc1)))
+            ComPtr<IDXGIFactory4> fresh;
+            if(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&fresh))))
+                factory = fresh;
+        }
+        bool probed = false;
+        if(factory && swapchainHwnd)
+        {
+            const HMONITOR mon = MonitorFromWindow(swapchainHwnd, MONITOR_DEFAULTTONEAREST);
+            ComPtr<IDXGIAdapter1> adapter;
+            if(mon && SUCCEEDED(factory->EnumAdapterByLuid(device->GetAdapterLuid(), IID_PPV_ARGS(&adapter))) && adapter)
             {
-                displayHdrCapable = (desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
-                display10Bit = desc1.BitsPerColor >= 10;
+                for(UINT idx = 0; ; ++idx)
+                {
+                    ComPtr<IDXGIOutput> out;
+                    if(adapter->EnumOutputs(idx, &out) == DXGI_ERROR_NOT_FOUND)
+                        break;
+                    ComPtr<IDXGIOutput6> out6;
+                    DXGI_OUTPUT_DESC1 desc1{};
+                    if(out && SUCCEEDED(out.As(&out6)) && SUCCEEDED(out6->GetDesc1(&desc1)) && desc1.Monitor == mon)
+                    {
+                        displayHdrCapable = (desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+                        display10Bit = desc1.BitsPerColor >= 10;
+                        probed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if(!probed)
+        {
+            ComPtr<IDXGIOutput> output;
+            ComPtr<IDXGIOutput6> output6;
+            if(SUCCEEDED(swapchain->GetContainingOutput(&output)) && output && SUCCEEDED(output.As(&output6)))
+            {
+                DXGI_OUTPUT_DESC1 desc1{};
+                if(SUCCEEDED(output6->GetDesc1(&desc1)))
+                {
+                    displayHdrCapable = (desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+                    display10Bit = desc1.BitsPerColor >= 10;
+                }
             }
         }
         hdrCheckTimer.start();
@@ -824,29 +882,44 @@ struct Dx12ReplayWindow::Pipeline
         }
     }
 
+    void releaseSwapchain()
+    {
+        try { waitForFence(fenceValue, 5000); } catch(const std::exception &) {}
+        swapchain.Reset();
+        swapchainHwnd = nullptr;
+        currentSwapchainColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+        hasPresentPermit = false;
+        swapchainOccluded = false;
+        if(frameLatency)
+        {
+            CloseHandle(frameLatency);
+            frameLatency = nullptr;
+        }
+    }
+
     void resize(HWND hwnd, QSize size)
     {
         const bool hwndChanged = swapchain && hwnd != swapchainHwnd;
-        if(!hwndChanged && size == outputSize)
+        if(!hwndChanged && swapchain && size == outputSize)
             return;
+        const bool sizeChanged = (size != outputSize);
         waitForFence(fenceValue);
         if(hwndChanged)
         {
             // Qt may recreate the native HWND when toggling FramelessWindowHint (Borderless/Windowed).
-            swapchain.Reset();
-            swapchainHwnd = nullptr;
-            currentSwapchainColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
-            hasPresentPermit = false;
-            if(frameLatency)
-            {
-                CloseHandle(frameLatency);
-                frameLatency = nullptr;
-            }
+            releaseSwapchain();
         }
+        swapchainOccluded = false;
         if(swapchain)
             check(swapchain->ResizeBuffers(0, size.width(), size.height(), DXGI_FORMAT_UNKNOWN, swapchainFlags), "DX12 resize");
         else
         {
+            if(factory && !factory->IsCurrent())
+            {
+                ComPtr<IDXGIFactory4> fresh;
+                if(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&fresh))))
+                    factory = fresh;
+            }
             DXGI_SWAP_CHAIN_DESC1 desc{};
             desc.Width = size.width();
             desc.Height = size.height();
@@ -876,28 +949,31 @@ struct Dx12ReplayWindow::Pipeline
         detectDisplayCapabilities();
 
         outputSize = size;
-        resetSr();
-        enhanced.Reset();
-        postInput.Reset();
-        splitBaseline.Reset();
-        interpOutput.Reset();
-        lastPresented.Reset();
-        lastPresentedSize = QSize();
-        for(auto &texture : videoHistory)
-            texture.Reset();
-        for(auto &texture : videoLumaHistory)
-            texture.Reset();
-        videoHistoryFormat = DXGI_FORMAT_UNKNOWN;
-        motionTexture.Reset();
-        motionRefinedTexture.Reset();
-        if(dlss)
+        if(sizeChanged)
+        {
+            resetSr();
+            enhanced.Reset();
+            postInput.Reset();
+            splitBaseline.Reset();
+            interpOutput.Reset();
+            lastPresented.Reset();
+            lastPresentedSize = QSize();
+            for(auto &texture : videoHistory)
+                texture.Reset();
+            for(auto &texture : videoLumaHistory)
+                texture.Reset();
+            videoHistoryFormat = DXGI_FORMAT_UNKNOWN;
+            motionTexture.Reset();
+            motionRefinedTexture.Reset();
+            dlssMotionTexture.Reset();
+            dlssDepth.Reset();
+            dlssGenerated.Reset();
+            dlssReal.Reset();
+        }
+        if(dlss && (hwndChanged || dlssSize != size))
             releaseDlss(vsr == nullptr);
-        if(fsrFg)
+        if(fsrFg && (hwndChanged || fsrFgSize != size))
             releaseFsrFg();
-        dlssMotionTexture.Reset();
-        dlssDepth.Reset();
-        dlssGenerated.Reset();
-        dlssReal.Reset();
         historyValid = false;
     }
 
@@ -1158,7 +1234,8 @@ struct Dx12ReplayWindow::Pipeline
             copyTo(source, target);
             return;
         }
-        if(upscaleSize.width() < videoArea.width() || upscaleSize.height() < videoArea.height())
+        if(upscaleSize.width() <= videoArea.width() && upscaleSize.height() <= videoArea.height()
+            && upscaleSize != videoArea)
         {
             // Stream-size (1:1 DLAA) output -> upscale cleanly to display size using FSR 1.0 EASU.
             recordFsr(source, target, upscaleSize, size);
@@ -1407,21 +1484,39 @@ struct Dx12ReplayWindow::Pipeline
         return videoArea;
     }
 
-    int evaluateVideoSuperResolution(ID3D12Resource *input, ID3D12Resource *output)
+    bool ensureVideoSuperResolution(int &status)
     {
-        int status = 0;
+        if(vsr)
+        {
+            status = 1;
+            return true;
+        }
+        status = 0;
+        if(!createVsr && !createVsrEx)
+            return false;
+        const auto path = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+        QDir().mkpath(path);
+        const bool shutdownOnFail = (dlss == nullptr);
+        beginFrame();
+        if(createVsrEx)
+            vsr = createVsrEx(device.Get(), graphicsCommands.Get(), reinterpret_cast<const wchar_t *>(path.utf16()),
+                shutdownOnFail, &status);
+        else
+            vsr = createVsr(device.Get(), graphicsCommands.Get(), reinterpret_cast<const wchar_t *>(path.utf16()), &status);
         if(!vsr)
         {
-            const auto path = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-            QDir().mkpath(path);
-            const bool shutdownOnFail = (dlss == nullptr);
-            if(createVsrEx)
-                vsr = createVsrEx(device.Get(), graphicsCommands.Get(), reinterpret_cast<const wchar_t *>(path.utf16()),
-                    shutdownOnFail, &status);
-            else
-                vsr = createVsr(device.Get(), graphicsCommands.Get(), reinterpret_cast<const wchar_t *>(path.utf16()), &status);
+            check(graphicsCommands->Close(), "DX12 discard RTX VSR initialization");
+            return false;
         }
-        return vsr ? evaluateVsr(vsr, graphicsCommands.Get(), input, output, vsrQuality) : status;
+        submit(nullptr, false);
+        waitForFence(fenceValue, 10000);
+        status = 1;
+        return true;
+    }
+
+    int evaluateVideoSuperResolution(ID3D12Resource *input, ID3D12Resource *output)
+    {
+        return vsr ? evaluateVsr(vsr, graphicsCommands.Get(), input, output, vsrQuality) : 0;
     }
 
     void prewarmVsr(QSize input, QSize size)
@@ -1429,14 +1524,22 @@ struct Dx12ReplayWindow::Pipeline
         if(!vsrQuality || srModel || !createVsr || !evaluateVsr || size.isEmpty())
             return;
         const QSize area = input.scaled(size, Qt::KeepAspectRatio);
-        if(area.width() <= input.width() || area.height() <= input.height())
+        const QSize targetSize = enhancementSize(input, area);
+        if(targetSize.width() <= input.width() || targetSize.height() <= input.height())
             return;
         QElapsedTimer time;
         time.start();
+        int initStatus = 0;
+        if(!ensureVideoSuperResolution(initStatus))
+        {
+            std::fprintf(stderr, "DX12 RTX VSR warmup unavailable (0x%08x).\n", unsigned(initStatus));
+            return;
+        }
+        waitForFence(fenceValue, 5000);
         rgb = makeTexture(input, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, rgbFormat);
         rgbSurfaceFormat = rgbFormat;
         convertedSize = input;
-        auto scratch = makeTexture(enhancementSize(input, area), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, rgbFormat);
+        auto scratch = makeTexture(targetSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, rgbFormat);
         beginFrame();
         clearTexture(rgb.Get(), 0);
         const int status = evaluateVideoSuperResolution(rgb.Get(), scratch.Get());
@@ -1514,10 +1617,11 @@ struct Dx12ReplayWindow::Pipeline
         if(!dlssBridge.isLoaded())
             dlssBridge.setFileName(base + "/PS5LinkDlssFg.dll");
         auto create = reinterpret_cast<CreateDlss>(dlssBridge.resolve("Ps5LinkDlssFgCreate"));
+        auto createEx = reinterpret_cast<CreateDlssEx>(dlssBridge.resolve("Ps5LinkDlssFgCreateEx"));
         evaluateDlss = reinterpret_cast<EvaluateDlss>(dlssBridge.resolve("Ps5LinkDlssFgEvaluate"));
         destroyDlss = reinterpret_cast<DestroyDlss>(dlssBridge.resolve("Ps5LinkDlssFgDestroy"));
         destroyDlssEx = reinterpret_cast<DestroyDlssEx>(dlssBridge.resolve("Ps5LinkDlssFgDestroyEx"));
-        if(!create || !evaluateDlss || !destroyDlss)
+        if((!create && !createEx) || !evaluateDlss || !destroyDlss)
             throw std::runtime_error("PS5LinkDlssFg.dll is unavailable");
         if(vsr)
         {
@@ -1533,8 +1637,12 @@ struct Dx12ReplayWindow::Pipeline
         beginFrame();
         const auto folder = QDir::toNativeSeparators(base + "/dlssg");
         int status = 0;
-        dlss = create(device.Get(), graphicsCommands.Get(), reinterpret_cast<const wchar_t *>(folder.utf16()),
-            useSm86, size.width(), size.height(), &status);
+        if(createEx)
+            dlss = createEx(device.Get(), graphicsCommands.Get(), reinterpret_cast<const wchar_t *>(folder.utf16()),
+                useSm86, size.width(), size.height(), vsr == nullptr, &status);
+        else
+            dlss = create(device.Get(), graphicsCommands.Get(), reinterpret_cast<const wchar_t *>(folder.utf16()),
+                useSm86, size.width(), size.height(), &status);
         if(!dlss)
         {
             check(graphicsCommands->Close(), "DX12 discard DLSS initialization");
@@ -1684,11 +1792,28 @@ struct Dx12ReplayWindow::Pipeline
 
     void waitForFence(uint64_t fence, DWORD timeoutMs = 3000)
     {
-        if(!fence || graphicsFence->GetCompletedValue() >= fence)
+        if(!fence)
+            return;
+        const uint64_t completed = graphicsFence->GetCompletedValue();
+        if(completed == UINT64_MAX)
+            check(device->GetDeviceRemovedReason(), "DX12 device removed during fence wait");
+        if(completed >= fence)
             return;
         check(graphicsFence->SetEventOnCompletion(fence, completedEvent), "DX12 arm graphics fence");
         if(WaitForSingleObject(completedEvent, timeoutMs) != WAIT_OBJECT_0)
             throw std::runtime_error("DX12 graphics fence timed out");
+    }
+
+    bool checkOccluded()
+    {
+        if(!swapchainOccluded || !swapchain)
+            return false;
+        const HRESULT status = swapchain->Present(0, DXGI_PRESENT_TEST);
+        if(status == DXGI_STATUS_OCCLUDED)
+            return true;
+        if(SUCCEEDED(status))
+            swapchainOccluded = false;
+        return false;
     }
 
     bool waitForPresentSlot(DWORD timeoutMs = 150)
@@ -1717,42 +1842,46 @@ struct Dx12ReplayWindow::Pipeline
 
     void drawOverlay(ID3D12Resource *target, QSize size, qreal refreshRate, bool usingVsr, bool usingFsr)
     {
-        const bool showQuickBar = !hideOnScreenControls.load() && !showMenu.load() && topBarHovered.load();
+        const bool wantQuickBar = !hideOnScreenControls.load() && !showMenu.load() && bottomDockHovered.load();
+        const bool showQuickBar = !hideOnScreenControls.load() && !showMenu.load() && (wantQuickBar || dockAnim > 0.005f);
         if(imguiFailed || (!showHud.load() && !showMenu.load() && !showQuickBar))
+        {
+            dockAnim = 0.0f;
             return;
+        }
         const auto ui = [](const char *en, const char *ru) { return ps5LinkUsesRussian() ? ru : en; };
         auto applyDs5Style = [](bool hdrScale)
         {
             ImGui::StyleColorsDark();
             auto &style = ImGui::GetStyle();
-            style.WindowRounding = 28.0f;
-            style.ChildRounding = 22.0f;
-            style.FrameRounding = 16.0f;
-            style.PopupRounding = 18.0f;
+            style.WindowRounding = 24.0f;
+            style.ChildRounding = 16.0f;
+            style.FrameRounding = 12.0f;
+            style.PopupRounding = 14.0f;
             style.ScrollbarRounding = 9.0f;
-            style.GrabRounding = 16.0f;
-            style.GrabMinSize = 18.0f;
+            style.GrabRounding = 12.0f;
+            style.GrabMinSize = 16.0f;
             style.TabRounding = 10.0f;
             style.WindowBorderSize = 1.0f;
             style.ChildBorderSize = 1.0f;
             style.PopupBorderSize = 1.0f;
             style.FrameBorderSize = 1.0f;
-            style.WindowPadding = ImVec2(16.0f, 14.0f);
-            style.FramePadding = ImVec2(12.0f, 7.0f);
-            style.ItemSpacing = ImVec2(8.0f, 6.0f);
-            style.ItemInnerSpacing = ImVec2(7.0f, 5.0f);
+            style.WindowPadding = ImVec2(14.0f, 11.0f);
+            style.FramePadding = ImVec2(10.0f, 5.0f);
+            style.ItemSpacing = ImVec2(8.0f, 5.0f);
+            style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
 
             auto *c = style.Colors;
             c[ImGuiCol_Text]                 = ImVec4(0.941f, 0.945f, 0.953f, 1.00f); // #F0F1F3
             c[ImGuiCol_TextDisabled]         = ImVec4(0.612f, 0.612f, 0.612f, 1.00f); // #9C9C9C
-            c[ImGuiCol_WindowBg]             = ImVec4(0.094f, 0.094f, 0.106f, 0.98f); // #18181B
-            c[ImGuiCol_ChildBg]              = ImVec4(0.137f, 0.137f, 0.157f, 0.92f); // #232328
-            c[ImGuiCol_PopupBg]              = ImVec4(0.129f, 0.129f, 0.149f, 0.98f); // #212126
-            c[ImGuiCol_Border]               = ImVec4(0.235f, 0.235f, 0.275f, 0.85f); // #3C3C46
+            c[ImGuiCol_WindowBg]             = ImVec4(0.086f, 0.088f, 0.102f, 0.94f); // #16161A
+            c[ImGuiCol_ChildBg]              = ImVec4(0.125f, 0.127f, 0.149f, 0.92f); // #202026
+            c[ImGuiCol_PopupBg]              = ImVec4(0.122f, 0.124f, 0.145f, 0.98f); // #1F1F25
+            c[ImGuiCol_Border]               = ImVec4(0.245f, 0.250f, 0.295f, 0.85f); // #3E404B
             c[ImGuiCol_BorderShadow]         = ImVec4(0.000f, 0.000f, 0.000f, 0.00f);
-            c[ImGuiCol_FrameBg]              = ImVec4(0.180f, 0.180f, 0.212f, 1.00f); // #2E2E36
-            c[ImGuiCol_FrameBgHovered]       = ImVec4(0.235f, 0.235f, 0.275f, 1.00f); // #3C3C46
-            c[ImGuiCol_FrameBgActive]        = ImVec4(0.275f, 0.275f, 0.322f, 1.00f);
+            c[ImGuiCol_FrameBg]              = ImVec4(0.173f, 0.176f, 0.212f, 1.00f); // #2C2D36
+            c[ImGuiCol_FrameBgHovered]       = ImVec4(0.235f, 0.239f, 0.282f, 1.00f); // #3C3D48
+            c[ImGuiCol_FrameBgActive]        = ImVec4(0.275f, 0.278f, 0.329f, 1.00f);
             c[ImGuiCol_TitleBg]              = ImVec4(0.118f, 0.118f, 0.137f, 1.00f);
             c[ImGuiCol_TitleBgActive]        = ImVec4(0.137f, 0.137f, 0.157f, 1.00f);
             c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.118f, 0.118f, 0.137f, 0.75f);
@@ -1761,16 +1890,16 @@ struct Dx12ReplayWindow::Pipeline
             c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.275f, 0.275f, 0.318f, 1.00f);
             c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.353f, 0.353f, 0.408f, 1.00f);
             c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.039f, 0.518f, 1.000f, 1.00f);
-            c[ImGuiCol_CheckMark]            = ImVec4(0.188f, 0.820f, 0.345f, 1.00f); // #30D158 DS5Link iOS Green
-            c[ImGuiCol_SliderGrab]           = ImVec4(0.039f, 0.518f, 1.000f, 1.00f); // #0A84FF DS5Link Blue
+            c[ImGuiCol_CheckMark]            = ImVec4(0.188f, 0.820f, 0.345f, 1.00f); // #30D158
+            c[ImGuiCol_SliderGrab]           = ImVec4(0.039f, 0.518f, 1.000f, 1.00f); // #0A84FF
             c[ImGuiCol_SliderGrabActive]     = ImVec4(0.270f, 0.620f, 1.000f, 1.00f);
-            c[ImGuiCol_Button]               = ImVec4(0.173f, 0.173f, 0.204f, 1.00f); // #2C2C34
-            c[ImGuiCol_ButtonHovered]        = ImVec4(0.235f, 0.235f, 0.278f, 1.00f); // #3C3C47
-            c[ImGuiCol_ButtonActive]         = ImVec4(0.039f, 0.518f, 1.000f, 1.00f); // #0A84FF
-            c[ImGuiCol_Header]               = ImVec4(0.173f, 0.173f, 0.204f, 1.00f);
+            c[ImGuiCol_Button]               = ImVec4(0.173f, 0.176f, 0.212f, 1.00f);
+            c[ImGuiCol_ButtonHovered]        = ImVec4(0.239f, 0.243f, 0.290f, 1.00f);
+            c[ImGuiCol_ButtonActive]         = ImVec4(0.039f, 0.518f, 1.000f, 1.00f);
+            c[ImGuiCol_Header]               = ImVec4(0.173f, 0.176f, 0.212f, 1.00f);
             c[ImGuiCol_HeaderHovered]        = ImVec4(0.039f, 0.518f, 1.000f, 0.55f);
             c[ImGuiCol_HeaderActive]         = ImVec4(0.039f, 0.518f, 1.000f, 0.85f);
-            c[ImGuiCol_Separator]            = ImVec4(0.204f, 0.204f, 0.239f, 1.00f);
+            c[ImGuiCol_Separator]            = ImVec4(0.220f, 0.224f, 0.263f, 0.90f);
             c[ImGuiCol_SeparatorHovered]     = ImVec4(0.039f, 0.518f, 1.000f, 0.78f);
             c[ImGuiCol_SeparatorActive]      = ImVec4(0.039f, 0.518f, 1.000f, 1.00f);
             c[ImGuiCol_PlotLines]            = ImVec4(0.039f, 0.518f, 1.000f, 1.00f);
@@ -1806,7 +1935,7 @@ struct Dx12ReplayWindow::Pipeline
             {
                 auto data = fontFile.readAll();
                 static const ImWchar glyphs[] = {0x0020, 0x00ff, 0x0400, 0x052f,
-                    0x2013, 0x2014, 0x2022, 0x2022, 0x2026, 0x2026, 0x25cf, 0x25cf, 0};
+                    0x2013, 0x2014, 0x2022, 0x2022, 0x2026, 0x2026, 0x2212, 0x2212, 0x25cf, 0x25cf, 0};
                 ImFontConfig config;
                 config.FontDataOwnedByAtlas = false; // The atlas copies borrowed data.
                 ioInit.Fonts->AddFontFromMemoryTTF(data.data(), int(data.size()), 15.0f, &config, glyphs);
@@ -1868,6 +1997,115 @@ struct Dx12ReplayWindow::Pipeline
         }
         const bool usingSr = srModel && !srFailed && sr != nullptr;
         const float activeSharpness = effectiveSharpness(usingSr, usingFsr);
+        const float hdrMul = hdrPassthroughActive ? 0.58f : 1.0f;
+        const auto tint = [hdrMul](float r, float g, float b, float a = 1.0f) {
+            return ImVec4(r * hdrMul, g * hdrMul, b * hdrMul, a);
+        };
+        const float lossPctLive = hudPacketLossPct.load();
+        const float bitrateLive = hudBitrateMbps.load();
+        const float rttLive = hudRttMs.load();
+        const int padBat = hudGamepadBattery.load();
+        const bool padChg = hudGamepadCharging.load();
+        const bool padFull = hudGamepadFull.load();
+        const bool padConnected = hudGamepadConnected.load();
+        const ImVec4 liveDotColor = (smoothedRenderMs > 15.5f || lossPctLive >= 1.0f) ? tint(1.0f, 0.27f, 0.23f)
+            : smoothedRenderMs > 12.0f ? tint(1.0f, 0.62f, 0.04f)
+            : tint(0.19f, 0.82f, 0.35f);
+
+        auto drawStatusDot = [](const ImVec4 &col, float radius = 4.0f) {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const float h = ImGui::GetFrameHeight();
+            ImGui::GetWindowDrawList()->AddCircleFilled(
+                ImVec2(p.x + radius + 1.0f, p.y + h * 0.5f), radius,
+                ImGui::ColorConvertFloat4ToU32(col), 16);
+            ImGui::Dummy(ImVec2(radius * 2.0f + 2.0f, h));
+        };
+
+        auto drawBatteryBadge = [&](float alphaScale) {
+            if(!padConnected)
+                return;
+            ImDrawList *dl = ImGui::GetWindowDrawList();
+            const float frameH = ImGui::GetFrameHeight();
+            const float bw = 22.0f;
+            const float bh = 11.0f;
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const float by = p.y + (frameH - bh) * 0.5f;
+            const ImVec4 outlineCol = tint(0.70f, 0.72f, 0.78f, 0.90f * alphaScale);
+            const ImVec4 fillCol = (padChg || padFull) ? tint(0.19f, 0.82f, 0.35f, alphaScale)
+                : (padBat >= 0 && padBat <= 15) ? tint(1.0f, 0.27f, 0.23f, alphaScale)
+                : (padBat >= 0 && padBat <= 30) ? tint(1.0f, 0.62f, 0.04f, alphaScale)
+                : tint(0.19f, 0.82f, 0.35f, alphaScale);
+            dl->AddRect(ImVec2(p.x, by), ImVec2(p.x + bw, by + bh), ImGui::ColorConvertFloat4ToU32(outlineCol), 3.0f, 0, 1.3f);
+            dl->AddRectFilled(ImVec2(p.x + bw + 1.0f, by + 3.0f), ImVec2(p.x + bw + 3.0f, by + bh - 3.0f),
+                ImGui::ColorConvertFloat4ToU32(outlineCol), 1.0f);
+            const float frac = padBat >= 0 ? std::clamp(padBat / 100.0f, 0.08f, 1.0f) : 0.65f;
+            const float innerW = std::max(2.0f, (bw - 4.0f) * frac);
+            dl->AddRectFilled(ImVec2(p.x + 2.0f, by + 2.0f), ImVec2(p.x + 2.0f + innerW, by + bh - 2.0f),
+                ImGui::ColorConvertFloat4ToU32(fillCol), 1.5f);
+            ImGui::Dummy(ImVec2(bw + 4.0f, frameH));
+            ImGui::SameLine(0.0f, 5.0f);
+            ImGui::AlignTextToFramePadding();
+            if(padBat >= 0)
+                ImGui::TextColored(fillCol, padChg && !padFull ? "%d%%+" : "%d%%", padBat);
+            else
+                ImGui::TextColored(fillCol, padChg ? "USB" : "PAD");
+        };
+
+        auto drawMinimalHudStrip = [&](float alphaScale) {
+            drawStatusDot(ImVec4(liveDotColor.x, liveDotColor.y, liveDotColor.z, liveDotColor.w * alphaScale), 4.0f);
+            ImGui::SameLine(0.0f, 6.0f);
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("%.0f", displayedFps);
+            ImGui::SameLine(0.0f, 3.0f);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("FPS");
+            ImGui::SameLine(0.0f, 7.0f);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("·");
+            ImGui::SameLine(0.0f, 7.0f);
+            ImGui::AlignTextToFramePadding();
+            if(bitrateLive > 0.05f)
+            {
+                ImGui::Text("%.1f", bitrateLive);
+                ImGui::SameLine(0.0f, 3.0f);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled(ui("Mbps", "Мбит/с"));
+            }
+            else
+                ImGui::TextDisabled(ui("Local", "Лок."));
+            if(rttLive > 0.1f)
+            {
+                ImGui::SameLine(0.0f, 7.0f);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("·");
+                ImGui::SameLine(0.0f, 7.0f);
+                ImGui::AlignTextToFramePadding();
+                ImGui::Text("%.0f", rttLive);
+                ImGui::SameLine(0.0f, 2.0f);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled(ui("ms", "мс"));
+            }
+            if(padConnected)
+            {
+                ImGui::SameLine(0.0f, 8.0f);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("·");
+                ImGui::SameLine(0.0f, 7.0f);
+                drawBatteryBadge(alphaScale);
+            }
+        };
+
+        if(showQuickBar)
+        {
+            const float targetAnim = wantQuickBar ? 1.0f : 0.0f;
+            const float stepAnim = std::min(1.0f, io.DeltaTime * 11.0f);
+            dockAnim = dockAnim + (targetAnim - dockAnim) * stepAnim;
+            if(std::abs(targetAnim - dockAnim) < 0.005f)
+                dockAnim = targetAnim;
+        }
+        else
+            dockAnim = 0.0f;
+
         if(showHud.load())
         {
             ImGui::SetNextWindowPos(ImVec2(18, 18), ImGuiCond_Always);
@@ -1878,8 +2116,9 @@ struct Dx12ReplayWindow::Pipeline
             const ImVec4 dotColor = (smoothedRenderMs > 15.5f || lossPctHeader >= 1.0f) ? ImVec4(1.0f, 0.27f, 0.23f, 1.0f)
                 : smoothedRenderMs > 12.0f ? ImVec4(1.0f, 0.62f, 0.04f, 1.0f)
                 : ImVec4(0.19f, 0.82f, 0.35f, 1.0f);
-            ImGui::TextColored(dotColor, "●");
-            ImGui::SameLine();
+            drawStatusDot(dotColor, 4.0f);
+            ImGui::SameLine(0.0f, 6.0f);
+            ImGui::AlignTextToFramePadding();
             ImGui::TextColored(ImVec4(0.94f, 0.95f, 0.96f, 1.0f), "PS5Link");
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.62f, 0.62f, 0.65f, 1.0f), ui("•  Direct3D 12 HUD", "•  Статистика Direct3D 12"));
@@ -1950,49 +2189,65 @@ struct Dx12ReplayWindow::Pipeline
             }
             ImGui::End();
         }
-        if(showQuickBar)
+        if(showQuickBar && dockAnim > 0.005f)
         {
-            ImGui::SetNextWindowPos(ImVec2(size.width() * 0.5f, 12.0f), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
-            ImGui::SetNextWindowBgAlpha(0.78f);
-            ImGui::Begin("QuickControls", nullptr, ImGuiWindowFlags_NoDecoration |
+            const float inv = 1.0f - dockAnim;
+            const float eased = 1.0f - inv * inv * inv;
+            const float slideOffset = (1.0f - eased) * 28.0f;
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 22.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 8.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 14.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 5.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 0.0f));
+            ImGui::SetNextWindowPos(ImVec2(size.width() * 0.5f, size.height() - 14.0f + slideOffset),
+                ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+            ImGui::SetNextWindowBgAlpha(0.90f * eased);
+            ImGui::Begin("BottomDock", nullptr, ImGuiWindowFlags_NoDecoration |
                 ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
-            bool needSameLine = false;
+
+            // Minimal Live HUD strip (FPS · Bitrate · RTT · Gamepad Battery)
+            drawMinimalHudStrip(eased);
+
+            // Subtle vertical hairline divider
+            ImGui::SameLine(0.0f, 10.0f);
+            {
+                const ImVec2 dp = ImGui::GetCursorScreenPos();
+                const float dh = ImGui::GetFrameHeight();
+                ImGui::GetWindowDrawList()->AddLine(
+                    ImVec2(dp.x, dp.y + 3.0f), ImVec2(dp.x, dp.y + dh - 3.0f),
+                    ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
+                ImGui::Dummy(ImVec2(2.0f, dh));
+            }
+
+            // Quick Controls
             if(showMicBtn.load())
             {
+                ImGui::SameLine(0.0f, 8.0f);
                 const bool mic = overlayMic.load();
-                if(ImGui::Button(mic ? ui("Mic: ON", "Микр. вкл.") : ui("Mic: OFF", "Микр. выкл.")))
-                    overlayAction(Microphone, mic ? 0 : 1);
-                needSameLine = true;
-            }
-            if(showAspectBtn.load())
-            {
-                if(needSameLine) ImGui::SameLine();
-                static const char *const kAspectNames[] = {ui("Fit", "Вписать"), ui("Fill", "Заполнить"), ui("Stretch", "Растянуть"), ui("Ambient", "Фон")};
-                const int cur = std::clamp(int(aspect), 0, 3);
-                char label[64];
-                std::snprintf(label, sizeof(label), ui("Aspect: %s", "Формат: %s"), kAspectNames[cur]);
-                if(ImGui::Button(label))
+                if(mic)
                 {
-                    const int next = (cur + 1) % 4;
-                    aspect = Aspect(next);
-                    historyValid = false;
-                    srHistoryValid = false;
-                    overlayAction(AspectMode, next);
+                    ImGui::PushStyleColor(ImGuiCol_Button, tint(0.12f, 0.42f, 0.22f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tint(0.16f, 0.52f, 0.28f));
                 }
-                needSameLine = true;
+                if(ImGui::Button(mic ? ui("Mic ON", "Микр. вкл.") : ui("Mic OFF", "Микр. выкл.")))
+                    overlayAction(Microphone, mic ? 0 : 1);
+                if(mic)
+                    ImGui::PopStyleColor(2);
             }
             if(showVolBtns.load())
             {
-                if(needSameLine) ImGui::SameLine();
+                ImGui::SameLine(0.0f, 6.0f);
                 const int maxVol = systemVolumeMode.load() ? 100 : 128;
                 const int step = systemVolumeMode.load() ? 5 : 8;
-                if(ImGui::Button(ui("Vol -", "Громкость −")))
+                const int curVol = overlayVolume.load();
+                const int volPct = maxVol > 0 ? int(std::lround(curVol * 100.0 / maxVol)) : 0;
+                if(ImGui::Button("−##dockvolminus", ImVec2(26.0f, 0.0f)))
                 {
                     if(!volMinusMutedThisHold)
                     {
-                        const int cur = overlayVolume.load();
-                        const int nv = std::max(0, cur - step);
-                        if(cur > 0) savedVolumeBeforeMute = cur;
+                        const int nv = std::max(0, curVol - step);
+                        if(curVol > 0) savedVolumeBeforeMute = curVol;
                         overlayAction(Volume, nv);
                     }
                     volMinusHoldTimer.invalidate();
@@ -2004,10 +2259,9 @@ struct Dx12ReplayWindow::Pipeline
                         volMinusHoldTimer.start();
                     else if(!volMinusMutedThisHold && volMinusHoldTimer.elapsed() >= 400)
                     {
-                        const int cur = overlayVolume.load();
-                        if(cur > 0)
+                        if(curVol > 0)
                         {
-                            savedVolumeBeforeMute = cur;
+                            savedVolumeBeforeMute = curVol;
                             overlayAction(Volume, 0);
                         }
                         else
@@ -2020,52 +2274,102 @@ struct Dx12ReplayWindow::Pipeline
                     volMinusHoldTimer.invalidate();
                     volMinusMutedThisHold = false;
                 }
-                ImGui::SameLine();
-                if(ImGui::Button(ui("Vol +", "Громкость +")))
+                ImGui::SameLine(0.0f, 4.0f);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%d%%", volPct);
+                ImGui::SameLine(0.0f, 4.0f);
+                if(ImGui::Button("+##dockvolplus", ImVec2(26.0f, 0.0f)))
                 {
-                    const int nv = std::min(maxVol, overlayVolume.load() + step);
+                    const int nv = std::min(maxVol, curVol + step);
                     overlayAction(Volume, nv);
                 }
-                needSameLine = true;
             }
-            if(needSameLine) ImGui::SameLine();
-            if(ImGui::Button(ui("Menu", "Меню")))
+            if(showAspectBtn.load())
+            {
+                ImGui::SameLine(0.0f, 6.0f);
+                const char *const kAspectNames[] = {ui("Fit", "Вписать"), ui("Fill", "Заполнить"), ui("Stretch", "Растянуть"), ui("Ambient", "Фон")};
+                const int cur = std::clamp(int(aspect), 0, 3);
+                if(ImGui::Button(kAspectNames[cur]))
+                {
+                    const int next = (cur + 1) % 4;
+                    aspect = Aspect(next);
+                    historyValid = false;
+                    srHistoryValid = false;
+                    overlayAction(AspectMode, next);
+                }
+            }
+            ImGui::SameLine(0.0f, 6.0f);
+            {
+                const bool hudOn = showHud.load();
+                if(hudOn)
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Button, tint(0.04f, 0.36f, 0.72f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tint(0.08f, 0.45f, 0.85f));
+                }
+                if(ImGui::Button("HUD"))
+                    overlayAction(Hud, hudOn ? 0 : 1);
+                if(hudOn)
+                    ImGui::PopStyleColor(2);
+            }
+            ImGui::SameLine(0.0f, 6.0f);
+            {
+                const int wm = windowMode.load();
+                if(ImGui::Button(wm == 2 ? ui("Fullscreen", "Весь экран") : ui("Window", "Окно")))
+                {
+                    const int next = (wm == 2) ? 0 : 2;
+                    windowMode.store(next);
+                    overlayAction(WindowMode, next);
+                }
+            }
+            ImGui::SameLine(0.0f, 6.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_SliderGrabActive));
+            if(ImGui::Button(ui("Settings", "Настройки")))
                 overlayAction(CloseMenu, 0);
+            ImGui::PopStyleColor(2);
+
             ImGui::End();
+            ImGui::PopStyleVar(6);
         }
         if(showMenu.load())
         {
-            const float panelWidth = std::clamp(io.DisplaySize.x - 24.0f, 1.0f, 520.0f);
-            const float panelHeight = std::max(io.DisplaySize.y - 24.0f, 1.0f);
-            ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
-                ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-            ImGui::SetNextWindowSizeConstraints(ImVec2(panelWidth, 0.0f), ImVec2(panelWidth, panelHeight));
+            const float panelWidth = std::clamp(io.DisplaySize.x - 36.0f, 340.0f, 900.0f);
+            const float panelMaxHeight = std::min(io.DisplaySize.y - 36.0f, 326.0f);
+            ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - 14.0f),
+                ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+            ImGui::SetNextWindowSizeConstraints(ImVec2(panelWidth, 0.0f), ImVec2(panelWidth, panelMaxHeight));
             ImGui::Begin("PS5Link", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize);
 
             const float rowWidth = ImGui::GetContentRegionAvail().x;
             const float gap = ImGui::GetStyle().ItemSpacing.x;
-            constexpr float resumeWidth = 130.0f;
-            ImGui::BeginGroup();
+            const bool twoCols = rowWidth >= 600.0f;
+
+            // Compact top header: brand + minimal live HUD (FPS · Bitrate · RTT · Battery) + Resume button
+            constexpr float resumeWidth = 122.0f;
+            const float headerLeftX = ImGui::GetCursorPosX();
+            ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted("PS5Link");
-            ImGui::TextDisabled("%.0f FPS  ·  %.1f ms", displayedFps, smoothedRenderMs);
-            ImGui::EndGroup();
-            if(rowWidth >= 280.0f)
-                ImGui::SameLine(ImGui::GetCursorPosX() + rowWidth - resumeWidth);
+            ImGui::SameLine(0.0f, 12.0f);
+            drawMinimalHudStrip(1.0f);
+            if(rowWidth >= 360.0f)
+                ImGui::SameLine(headerLeftX + rowWidth - resumeWidth);
             ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_SliderGrabActive));
-            if(ImGui::Button(ui("Resume", "Продолжить"), ImVec2(resumeWidth, 36.0f)))
+            if(ImGui::Button(ui("Resume", "Продолжить"), ImVec2(resumeWidth, 28.0f)))
                 overlayAction(CloseMenu, 0);
             ImGui::PopStyleColor(2);
 
-            static const char *const pageNames[] = {ui("Display", "Экран"), ui("Video", "Видео"), ui("Color", "Цвет"), ui("Controls", "Управление"), ui("Session", "Сеанс")};
-            const bool narrow = rowWidth < 375.0f;
-            const int columns = narrow ? 3 : 5;
-            const float tabHeight = ImGui::GetFrameHeight();
-            const float tabWidth = std::max(1.0f, std::floor((rowWidth - 10.0f - (columns - 1) * 4.0f) / columns));
-            const float tabsHeight = narrow ? tabHeight * 2.0f + 14.0f : tabHeight + 10.0f;
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(5, 5));
+            // Wide single-row tab selector bar
+            const char *const pageNames[] = {ui("Display", "Экран"), ui("Video", "Видео"), ui("Color", "Цвет"), ui("Controls", "Управление"), ui("Session", "Сеанс")};
+            const bool narrow = rowWidth < 400.0f;
+            const int tabCols = narrow ? 3 : 5;
+            const float tabHeight = 26.0f;
+            const float tabWidth = std::max(1.0f, std::floor((rowWidth - 8.0f - (tabCols - 1) * 4.0f) / tabCols));
+            const float tabsHeight = narrow ? tabHeight * 2.0f + 12.0f : tabHeight + 8.0f;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 4));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 11.0f);
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_ScrollbarBg));
             ImGui::PushStyleColor(ImGuiCol_Border, ImGui::GetStyleColorVec4(ImGuiCol_ChildBg));
             if(ImGui::BeginChild("Sections", ImVec2(0, tabsHeight), ImGuiChildFlags_AlwaysUseWindowPadding,
@@ -2073,7 +2377,7 @@ struct Dx12ReplayWindow::Pipeline
             {
                 for(int i = 0; i < int(std::size(pageNames)); ++i)
                 {
-                    if(i % columns)
+                    if(i % tabCols)
                         ImGui::SameLine();
                     ImGui::PushStyleColor(ImGuiCol_Button, i == overlayPage ?
                         ImGui::GetStyleColorVec4(ImGuiCol_FrameBgActive) : ImVec4(0, 0, 0, 0));
@@ -2084,11 +2388,12 @@ struct Dx12ReplayWindow::Pipeline
             }
             ImGui::EndChild();
             ImGui::PopStyleColor(2);
-            ImGui::PopStyleVar(2);
+            ImGui::PopStyleVar(3);
 
-            const float bodyLimit = std::max(75.0f, panelHeight - ImGui::GetCursorPosY() -
-                ImGui::GetStyle().WindowPadding.y - tabHeight - gap * 2.0f);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(15, 13));
+            const float footerHeight = ImGui::GetFrameHeight() + 6.0f;
+            const float bodyLimit = std::max(90.0f, panelMaxHeight - ImGui::GetCursorPosY() -
+                ImGui::GetStyle().WindowPadding.y - footerHeight - gap);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 10));
             ImGui::PushID(overlayPage);
             ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, bodyLimit));
             if(ImGui::BeginChild("Settings", ImVec2(0, 0), ImGuiChildFlags_Borders |
@@ -2097,12 +2402,13 @@ struct Dx12ReplayWindow::Pipeline
                 const auto drawLabel = [](const char *label)
                 {
                     const float width = ImGui::GetContentRegionAvail().x;
-                    if(width >= 350.0f)
+                    if(width >= 260.0f)
                     {
                         ImGui::AlignTextToFramePadding();
                         const float left = ImGui::GetCursorPosX();
                         ImGui::TextUnformatted(label);
-                        ImGui::SameLine(left + width * 0.48f);
+                        ImGui::SameLine(0.0f, 0.0f);
+                        ImGui::SetCursorPosX(left + width * 0.44f);
                     }
                     else
                         ImGui::TextWrapped("%s", label);
@@ -2118,15 +2424,15 @@ struct Dx12ReplayWindow::Pipeline
                     if(pressed)
                         enabled = !enabled;
                     ImDrawList *draw = ImGui::GetWindowDrawList();
-                    constexpr float trackHeight = 22.0f;
-                    constexpr float trackWidth = 40.0f;
+                    constexpr float trackHeight = 20.0f;
+                    constexpr float trackWidth = 36.0f;
                     const float x = pos.x + width - trackWidth;
                     const float y = pos.y + (height - trackHeight) * 0.5f;
                     draw->AddRectFilled(ImVec2(x, y), ImVec2(x + trackWidth, y + trackHeight),
                         ImGui::GetColorU32(enabled ? ImGuiCol_CheckMark :
                             ImGui::IsItemHovered() ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg), trackHeight * 0.5f);
-                    draw->AddCircleFilled(ImVec2(x + (enabled ? trackWidth - 11.0f : 11.0f), y + 11.0f),
-                        8.0f, ImGui::GetColorU32(ImGuiCol_Text));
+                    draw->AddCircleFilled(ImVec2(x + (enabled ? trackWidth - 10.0f : 10.0f), y + 10.0f),
+                        7.5f, ImGui::GetColorU32(ImGuiCol_Text));
                     const ImVec4 clip(pos.x, pos.y, x - 6.0f, pos.y + height);
                     draw->AddText(nullptr, 0, ImVec2(pos.x, pos.y + (height - ImGui::GetFontSize()) * 0.5f),
                         ImGui::GetColorU32(ImGuiCol_Text), label, nullptr, 0, &clip);
@@ -2149,7 +2455,7 @@ struct Dx12ReplayWindow::Pipeline
 
                     ImDrawList *draw = ImGui::GetWindowDrawList();
                     const ImVec2 pos = ImGui::GetCursorScreenPos();
-                    const float x = pos.x + ImGui::CalcItemWidth() - 17.0f;
+                    const float x = pos.x + ImGui::CalcItemWidth() - 16.0f;
                     const float y = pos.y + ImGui::GetFrameHeight() * 0.5f;
                     const ImU32 color = ImGui::GetColorU32(ImGuiCol_TextDisabled);
                     const bool open = ImGui::BeginCombo(id, preview, ImGuiComboFlags_NoArrowButton);
@@ -2178,12 +2484,36 @@ struct Dx12ReplayWindow::Pipeline
                     return changed;
                 };
 
+                const auto beginColumns = [&](const char *tableId) -> bool {
+                    if(!twoCols)
+                        return false;
+                    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 2.0f));
+                    if(ImGui::BeginTable(tableId, 2, ImGuiTableFlags_SizingStretchSame))
+                    {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        return true;
+                    }
+                    ImGui::PopStyleVar();
+                    return false;
+                };
+                const auto nextColumn = [&](bool inTable) {
+                    if(inTable)
+                        ImGui::TableSetColumnIndex(1);
+                };
+                const auto endColumns = [&](bool inTable) {
+                    if(inTable)
+                    {
+                        ImGui::EndTable();
+                        ImGui::PopStyleVar();
+                    }
+                };
+
                 ImGui::PushTextWrapPos(0.0f);
                 switch(overlayPage)
                 {
                 case 0: {
-                    ImGui::TextUnformatted(ui("Display and window mode", "Вывод и режим окна"));
-                    ImGui::Spacing();
+                    const bool tbl = beginColumns("DisplayCols");
                     int pacing = presentMode.load();
                     drawLabel(ui("Output timing", "Синхронизация"));
                     if(combo("##Output timing", &pacing, ui("Low latency\0Balanced 60 FPS\0VSync\0", "Низкая задержка\0Баланс 60 FPS\0VSync\0")))
@@ -2192,7 +2522,7 @@ struct Dx12ReplayWindow::Pipeline
                         overlayAction(PresentMode, pacing);
                     }
                     if(pacing == 0 && !tearingSupported)
-                        ImGui::TextUnformatted(ui("Tearing unavailable. VSync active.", "Разрывы кадров недоступны. Включён VSync."));
+                        ImGui::TextDisabled(ui("Tearing unavailable. VSync active.", "Разрывы недоступны. Включён VSync."));
                     int fit = int(aspect);
                     drawLabel(ui("Aspect", "Формат кадра"));
                     if(combo("##Aspect", &fit, ui("Fit\0Fill\0Stretch\0Ambient\0", "Вписать\0Заполнить\0Растянуть\0Фон по краям\0")))
@@ -2212,6 +2542,8 @@ struct Dx12ReplayWindow::Pipeline
                             overlayAction(AmbientStyle, amb);
                         }
                     }
+
+                    nextColumn(tbl);
                     int wmode = windowMode.load();
                     drawLabel(ui("Window mode", "Режим окна"));
                     if(combo("##Window mode", &wmode, ui("Fullscreen\0Borderless\0Windowed\0", "Полный экран\0Без рамки\0Окно\0")))
@@ -2219,29 +2551,22 @@ struct Dx12ReplayWindow::Pipeline
                         windowMode.store(wmode);
                         overlayAction(WindowMode, wmode);
                     }
+                    bool hud = showHud.load();
+                    if(toggle(ui("Full performance HUD", "Полная статистика (HUD)"), hud))
+                        overlayAction(Hud, hud);
+                    ImGui::TextDisabled(ui("%d × %d @ %.0f Hz  ·  Render %.1f ms", "%d × %d @ %.0f Гц  ·  Рендер %.1f мс"),
+                        size.width(), size.height(), refreshRate, smoothedRenderMs);
+                    endColumns(tbl);
                     break;
                 }
                 case 1: {
-                    ImGui::TextUnformatted(ui("Scaling and frame generation", "Масштабирование и кадры"));
-                    ImGui::Spacing();
+                    const bool tbl = beginColumns("VideoCols");
                     // Upscaling mapping: 0=Shader, 1=FSR 1.0, 2..5=VSR 1..4, 6=DLSS 4 SR, 7=DLSS 4.5 SR
                     int upscale = srModel ? srModel + 5 : vsrQuality ? vsrQuality + 1 : fsrEnabled ? 1 : 0;
                     drawLabel(ui("Upscaling", "Масштабирование"));
                     if(combo("##Upscaling", &upscale,
                         ui("DX12 shader\0AMD FSR 1.0 (EASU)\0RTX VSR Low\0RTX VSR Medium\0RTX VSR High\0RTX VSR Ultra\0DLSS 4 SR\0DLSS 4.5 SR\0", "Шейдер DX12\0AMD FSR 1.0 (EASU)\0RTX VSR Low\0RTX VSR Medium\0RTX VSR High\0RTX VSR Ultra\0DLSS 4 SR\0DLSS 4.5 SR\0")))
                         overlayAction(Upscale, upscale);
-                    if(usingSr)
-                        ImGui::TextColored(ImVec4(0.19f, 0.82f, 0.35f, 1.0f), ui("● DLSS %s SR active (preset %c) | %dx%d%s", "● DLSS %s SR активно (пресет %c) | %dx%d%s"), srModel == 2 ? "4.5" : "4",
-                            srModel == 2 ? 'M' : 'K', upscaleSize.width(), upscaleSize.height(),
-                            upscaleHeight == 1 ? " (DLAA)" : "");
-                    else if(usingVsr)
-                        ImGui::TextColored(ImVec4(0.19f, 0.82f, 0.35f, 1.0f), ui("● RTX VSR active (quality %d) | %dx%d", "● RTX VSR активно (качество %d) | %dx%d"), vsrQuality, upscaleSize.width(), upscaleSize.height());
-                    else if(usingFsr)
-                        ImGui::TextColored(ImVec4(0.19f, 0.82f, 0.35f, 1.0f), ui("● AMD FSR 1.0 (EASU) active", "● AMD FSR 1.0 (EASU) активно"));
-                    else if(vsrError)
-                        ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.04f, 1.0f), ui("RTX VSR failed (0x%08x). Shader scaling active.", "Ошибка RTX VSR (0x%08x). Работает шейдер DX12."), vsrError);
-                    else if(vsrQuality && !srModel)
-                        ImGui::TextDisabled(ui("RTX VSR needs larger output at the stream aspect ratio.", "Для RTX VSR увеличьте размер вывода с пропорциями потока."));
                     int targetIndex = upscaleHeight == 2160 ? 3 : upscaleHeight == 1800 ? 2 : upscaleHeight == 1 ? 1 : 0;
                     drawLabel(ui("Resolution", "Разрешение"));
                     if(combo("##Resolution", &targetIndex, ui("Output size\0Stream size (DLSS AA)\0Intermediate 1800p\0Intermediate 2160p\0", "Размер экрана\0Размер потока (DLSS AA)\0Промежуточные 1800p\0Промежуточные 2160p\0")))
@@ -2249,6 +2574,35 @@ struct Dx12ReplayWindow::Pipeline
                         upscaleHeight = targetIndex == 3 ? 2160 : targetIndex == 2 ? 1800 : targetIndex == 1 ? 1 : 0;
                         overlayAction(UpscaleTarget, upscaleHeight);
                     }
+                    if(usingSr)
+                    {
+                        drawStatusDot(tint(0.19f, 0.82f, 0.35f), 3.5f);
+                        ImGui::SameLine(0.0f, 5.0f);
+                        ImGui::AlignTextToFramePadding();
+                        ImGui::TextColored(tint(0.19f, 0.82f, 0.35f), ui("DLSS %s SR (%c) | %dx%d%s", "DLSS %s SR (%c) | %dx%d%s"), srModel == 2 ? "4.5" : "4",
+                            srModel == 2 ? 'M' : 'K', upscaleSize.width(), upscaleSize.height(),
+                            upscaleHeight == 1 ? " (DLAA)" : "");
+                    }
+                    else if(usingVsr)
+                    {
+                        drawStatusDot(tint(0.19f, 0.82f, 0.35f), 3.5f);
+                        ImGui::SameLine(0.0f, 5.0f);
+                        ImGui::AlignTextToFramePadding();
+                        ImGui::TextColored(tint(0.19f, 0.82f, 0.35f), ui("RTX VSR Q%d | %dx%d", "RTX VSR Q%d | %dx%d"), vsrQuality, upscaleSize.width(), upscaleSize.height());
+                    }
+                    else if(usingFsr)
+                    {
+                        drawStatusDot(tint(0.19f, 0.82f, 0.35f), 3.5f);
+                        ImGui::SameLine(0.0f, 5.0f);
+                        ImGui::AlignTextToFramePadding();
+                        ImGui::TextColored(tint(0.19f, 0.82f, 0.35f), ui("AMD FSR 1.0 (EASU) active", "AMD FSR 1.0 (EASU) активно"));
+                    }
+                    else if(vsrError)
+                        ImGui::TextColored(tint(1.0f, 0.62f, 0.04f), ui("RTX VSR failed (0x%08x).", "Ошибка RTX VSR (0x%08x)."), vsrError);
+                    else if(vsrQuality && !srModel)
+                        ImGui::TextDisabled(ui("RTX VSR needs larger output size.", "Для RTX VSR нужен больший размер вывода."));
+
+                    nextColumn(tbl);
                     int sharp = sharpnessSetting.load();
                     int sharpUi = sharp < 0 ? int(std::lround(activeSharpness * 100.0f)) : sharp;
                     const char *sharpFmt = sharp < 0 ? ui("Auto (%d%%)", "Авто (%d%%)") : "%d%%";
@@ -2258,6 +2612,12 @@ struct Dx12ReplayWindow::Pipeline
                         sharpnessSetting.store(sharpUi);
                         overlayAction(Sharpness, sharpUi);
                     }
+                    int generation = srModel ? 0 : generationMode;
+                    ImGui::BeginDisabled(srModel || refreshRate < 119);
+                    drawLabel(ui("Frame generation", "Генерация кадров"));
+                    if(combo("##Frame generation", &generation, ui("Off\0Interpolation ×2\0DLSS FG ×2\0AMD FSR 3.1 FG ×2\0", "Выкл.\0Интерполяция ×2\0DLSS FG ×2\0AMD FSR 3.1 FG ×2\0")))
+                        overlayAction(Generation, generation);
+                    ImGui::EndDisabled();
                     ImGui::BeginDisabled(!usingSr && !usingVsr && !usingFsr);
                     bool split = splitScreen.load();
                     if(toggle(ui("A/B comparison", "Сравнение A/B"), split))
@@ -2265,28 +2625,22 @@ struct Dx12ReplayWindow::Pipeline
                     if(split)
                     {
                         float pos = splitPosition.load() * 100.0f;
-                        drawLabel(ui("A/B split position", "Граница A/B"));
+                        drawLabel(ui("A/B split", "Граница A/B"));
                         if(ImGui::SliderFloat("##A/B split position", &pos, 5.0f, 95.0f, "%.0f%%"))
                             splitPosition.store(pos / 100.0f);
                     }
                     ImGui::EndDisabled();
-                    int generation = srModel ? 0 : generationMode;
-                    ImGui::BeginDisabled(srModel || refreshRate < 119);
-                    drawLabel(ui("Frame generation", "Генерация кадров"));
-                    if(combo("##Frame generation", &generation, ui("Off\0Interpolation ×2\0DLSS FG ×2\0AMD FSR 3.1 FG ×2\0", "Выкл.\0Интерполяция ×2\0DLSS FG ×2\0AMD FSR 3.1 FG ×2\0")))
-                        overlayAction(Generation, generation);
-                    ImGui::EndDisabled();
                     if(srModel && srFailed)
-                        ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.04f, 1.0f), ui("DLSS SR unavailable. Shader scaling active.", "DLSS SR недоступен. Работает шейдер DX12."));
+                        ImGui::TextColored(tint(1.0f, 0.62f, 0.04f), ui("DLSS SR unavailable.", "DLSS SR недоступен."));
                     if(generationMode == 2 && dlssFailed)
-                        ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.04f, 1.0f), ui("DLSS FG unavailable. Showing original frames.", "DLSS FG недоступна. Выводятся исходные кадры."));
+                        ImGui::TextColored(tint(1.0f, 0.62f, 0.04f), ui("DLSS FG unavailable.", "DLSS FG недоступна."));
                     if(generationMode == 3 && fsrFgFailed)
-                        ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.04f, 1.0f), ui("FSR FG unavailable. Showing original frames.", "FSR FG недоступна. Выводятся исходные кадры."));
+                        ImGui::TextColored(tint(1.0f, 0.62f, 0.04f), ui("FSR FG unavailable.", "FSR FG недоступна."));
+                    endColumns(tbl);
                     break;
                 }
                 case 2: {
-                    ImGui::TextUnformatted(ui("Color and HDR", "Цвет и HDR"));
-                    ImGui::Spacing();
+                    const bool tbl = beginColumns("ColorCols");
                     bool dither = ditherEnabled.load();
                     if(toggle(ui("Dithering", "Дизеринг"), dither))
                     {
@@ -2305,6 +2659,15 @@ struct Dx12ReplayWindow::Pipeline
                         hdrPassthroughEnabled.store(hdrPass);
                         overlayAction(HdrPassthrough, hdrPass ? 1 : 0);
                     }
+                    if(ImGui::Button(ui("Reset color", "Сбросить цвет")))
+                    {
+                        colorContrast.store(100); overlayAction(ColorContrast, 100);
+                        colorSaturation.store(100); overlayAction(ColorSaturation, 100);
+                        colorGamma.store(100); overlayAction(ColorGamma, 100);
+                        hdrPaperWhite.store(203); overlayAction(HdrPaperWhite, 203);
+                    }
+
+                    nextColumn(tbl);
                     int contrast = colorContrast.load();
                     drawLabel(ui("Contrast", "Контраст"));
                     if(ImGui::SliderInt("##Contrast", &contrast, 80, 130, "%d%%"))
@@ -2333,27 +2696,17 @@ struct Dx12ReplayWindow::Pipeline
                         hdrPaperWhite.store(white);
                         overlayAction(HdrPaperWhite, white);
                     }
-                    if(ImGui::Button(ui("Reset color", "Сбросить цвет")))
-                    {
-                        colorContrast.store(100); overlayAction(ColorContrast, 100);
-                        colorSaturation.store(100); overlayAction(ColorSaturation, 100);
-                        colorGamma.store(100); overlayAction(ColorGamma, 100);
-                        hdrPaperWhite.store(203); overlayAction(HdrPaperWhite, 203);
-                    }
+                    endColumns(tbl);
                     break;
                 }
                 case 3: {
-                    ImGui::TextUnformatted(ui("Audio, HUD and input", "Звук, HUD и ввод"));
-                    ImGui::Spacing();
+                    const bool tbl = beginColumns("ControlCols");
                     int volume = overlayVolume.load();
                     const bool sysVol = systemVolumeMode.load();
                     drawLabel(sysVol ? ui("Windows volume", "Громкость Windows") : ui("Volume", "Громкость"));
                     if(ImGui::SliderInt("##Volume", &volume, 0, sysVol ? 100 : 128,
                         sysVol ? "%d%%" : "%d"))
                         overlayAction(Volume, volume);
-                    bool hud = showHud.load();
-                    if(toggle(ui("Performance HUD", "Статистика (HUD)"), hud))
-                        overlayAction(Hud, hud);
                     bool mic = overlayMic.load();
                     if(toggle(ui("Microphone", "Микрофон"), mic))
                         overlayAction(Microphone, mic);
@@ -2364,15 +2717,20 @@ struct Dx12ReplayWindow::Pipeline
                         const bool full = Ds5BtManager::instance().isFullyCharged();
                         const bool hp = Ds5BtManager::instance().isHeadphonesPlugged();
                         const bool hsMic = Ds5BtManager::instance().isHeadsetMicPlugged();
-                        ImGui::TextColored(ImVec4(0.19f, 0.82f, 0.35f, 1.0f),
-                            ui("● DualSense Bluetooth: %d%%%s%s", "● DualSense Bluetooth: %d%%%s%s"),
+                        drawStatusDot(tint(0.19f, 0.82f, 0.35f), 3.5f);
+                        ImGui::SameLine(0.0f, 5.0f);
+                        ImGui::AlignTextToFramePadding();
+                        ImGui::TextColored(tint(0.19f, 0.82f, 0.35f),
+                            ui("DualSense BT: %d%%%s%s", "DualSense BT: %d%%%s%s"),
                             bat >= 0 ? bat : 0,
                             full ? ui(" (Full)", " (Полный)") : (chg ? ui(" (Charging)", " (Зарядка)") : ""),
-                            hp ? (hsMic ? ui(" | 3.5mm Headset", " | Гарнитура 3.5мм") : ui(" | 3.5mm Headphones", " | Наушники 3.5мм")) : "");
+                            hp ? (hsMic ? ui(" | Headset", " | Гарнитура") : ui(" | Headphones", " | Наушники")) : "");
                         bool btSpk = Ds5BtManager::instance().isSpeakerAudioEnabled();
                         if(toggle(ui("DualSense BT speaker audio", "Звук на динамик DualSense (BT)"), btSpk))
                             Ds5BtManager::instance().setSpeakerAudioEnabled(btSpk);
                     }
+
+                    nextColumn(tbl);
                     bool conceal = errorConcealment.load();
                     if(toggle(ui("Hold clean frame", "Удерживать чистый кадр"), conceal))
                     {
@@ -2387,24 +2745,26 @@ struct Dx12ReplayWindow::Pipeline
                     }
                     if(ImGui::Button(ui("Reset gyro", "Сбросить гироскоп")))
                         overlayAction(ResetGyro, 0);
+                    endColumns(tbl);
                     break;
                 }
                 case 4: {
-                    ImGui::TextUnformatted(ui("Remote Play session", "Сеанс Remote Play"));
-                    ImGui::Spacing();
-                    if(ImGui::Button(ui("Disconnect", "Отключиться"), ImVec2(-1, 0)))
+                    const bool tbl = beginColumns("SessionCols");
+                    if(ImGui::Button(ui("Disconnect", "Отключиться"), ImVec2(-1, 30.0f)))
                         overlayAction(Disconnect, 0);
-                    if(ImGui::Button(ui("Put PS5 into rest mode", "Перевести PS5 в режим покоя"), ImVec2(-1, 0)))
+                    if(ImGui::Button(ui("Put PS5 into rest mode", "Перевести PS5 в режим покоя"), ImVec2(-1, 30.0f)))
                         overlayAction(SleepConsole, 0);
-                    ImGui::Spacing();
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.32f, 0.14f, 0.15f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.56f, 0.20f, 0.21f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.42f, 0.15f, 0.16f, 1.0f));
-                    if(ImGui::Button(ui("Exit PS5Link", "Выйти из PS5Link"), ImVec2(-1, 0)))
+
+                    nextColumn(tbl);
+                    ImGui::PushStyleColor(ImGuiCol_Button, tint(0.34f, 0.14f, 0.16f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tint(0.56f, 0.20f, 0.22f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, tint(0.42f, 0.15f, 0.17f));
+                    if(ImGui::Button(ui("Exit PS5Link", "Выйти из PS5Link"), ImVec2(-1, 30.0f)))
                         overlayAction(ExitApp, 0);
-                    if(ImGui::Button(ui("Rest mode and exit", "Режим покоя и выход"), ImVec2(-1, 0)))
+                    if(ImGui::Button(ui("Rest mode and exit", "Режим покоя и выход"), ImVec2(-1, 30.0f)))
                         overlayAction(SleepAndExit, 0);
                     ImGui::PopStyleColor(3);
+                    endColumns(tbl);
                     break;
                 }
                 }
@@ -2413,10 +2773,39 @@ struct Dx12ReplayWindow::Pipeline
             ImGui::EndChild();
             ImGui::PopID();
             ImGui::PopStyleVar();
-            if(ImGui::Button(ui("All settings", "Все настройки"), ImVec2(-1, 0)))
+
+            // Slim footer row: All settings + shortcut hint on left, quick Disconnect on right
+            const float footerLeftX = ImGui::GetCursorPosX();
+            if(ImGui::Button(ui("All settings", "Все настройки")))
                 overlayAction(OpenFullSettings, 0);
+            ImGui::SameLine(0.0f, 12.0f);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled(ui("Ctrl+O  ·  Esc to close", "Ctrl+O  ·  Esc — закрыть"));
+            if(overlayPage != 4)
+            {
+                const char *discLabel = ui("Disconnect", "Отключиться");
+                const float discW = ImGui::CalcTextSize(discLabel).x + ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f;
+                if(rowWidth >= 380.0f)
+                {
+                    ImGui::SameLine(footerLeftX + rowWidth - discW);
+                    ImGui::PushStyleColor(ImGuiCol_Button, tint(0.32f, 0.14f, 0.16f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, tint(0.52f, 0.19f, 0.21f));
+                    if(ImGui::Button(discLabel, ImVec2(discW, 0.0f)))
+                        overlayAction(Disconnect, 0);
+                    ImGui::PopStyleColor(2);
+                }
+            }
+            const ImVec2 winPos = ImGui::GetWindowPos();
+            const ImVec2 winSize = ImGui::GetWindowSize();
+            menuLeftPx.store(winPos.x);
+            menuTopPx.store(winPos.y);
+            menuRightPx.store(winPos.x + winSize.x);
+            menuBottomPx.store(winPos.y + winSize.y);
+            menuPopupOpen.store(ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId));
             ImGui::End();
         }
+        else
+            menuPopupOpen.store(false);
         ImGui::Render();
         auto *commands = graphicsCommands.Get();
         transition(commands, target, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -2474,8 +2863,19 @@ struct Dx12ReplayWindow::Pipeline
             call.start();
             presented = swapchain->Present(tear ? 0 : 1, tear ? DXGI_PRESENT_ALLOW_TEARING : 0);
             if(presented == S_OK)
+            {
                 presentCalls.push(call.nsecsElapsed());
-            hasPresentPermit = false;
+                hasPresentPermit = false;
+            }
+            else if(presented == DXGI_STATUS_OCCLUDED)
+            {
+                swapchainOccluded = true;
+                // Do not clear hasPresentPermit: DXGI_STATUS_OCCLUDED does not consume a latency token.
+            }
+            else
+            {
+                hasPresentPermit = false;
+            }
         }
         check(device->GetDeviceRemovedReason(), "DX12 device status");
         check(presented, "DX12 present");
@@ -2485,6 +2885,8 @@ struct Dx12ReplayWindow::Pipeline
     void presentOverlayOnly(HWND hwnd, QSize size, qreal refreshRate)
     {
         resize(hwnd, size);
+        if(checkOccluded())
+            return;
         if(!waitForPresentSlot(50))
             return;
         ComPtr<ID3D12Resource> backBuffer;
@@ -2508,10 +2910,18 @@ struct Dx12ReplayWindow::Pipeline
         QElapsedTimer time;
         time.start();
         const auto &decoded = *reinterpret_cast<const AVD3D12VAFrame *>(frame.data[0]);
+        if(!decoded.texture)
+            throw std::runtime_error("D3D12VA returned an empty video texture");
         const auto sourceFormat = decoded.texture->GetDesc().Format;
         if(sourceFormat != DXGI_FORMAT_NV12 && sourceFormat != DXGI_FORMAT_P010)
             throw std::runtime_error("DX12 streaming requires NV12 or P010");
         resize(hwnd, size);
+        if(capturePath.isEmpty() && checkOccluded())
+        {
+            ++occluded;
+            historyValid = false;
+            return false;
+        }
         if(isHdrStream && (!hdrCheckTimer.isValid() || hdrCheckTimer.elapsed() >= 2000))
             detectDisplayCapabilities();
         const QSize sourceSize(frame.width, frame.height);
@@ -2526,9 +2936,10 @@ struct Dx12ReplayWindow::Pipeline
         const QSize videoArea = aspect == Aspect::Stretch ? size : sourceSize.scaled(size,
             aspect == Aspect::Fill ? Qt::KeepAspectRatioByExpanding : Qt::KeepAspectRatio);
         // Works on 16:9, 21:9 ultrawide, 16:10 laptops, Ambient bars, and arbitrary Windowed sizes.
-        const bool canUpscale = fitArea.width() > frame.width && fitArea.height() > frame.height;
+        const QSize targetEnhancement = enhancementSize(sourceSize, fitArea);
+        const bool canUpscale = targetEnhancement.width() > frame.width && targetEnhancement.height() > frame.height;
         const bool canDlssSr = (upscaleHeight == 1 && srModel > 0) || canUpscale;
-        const QSize intermediate = canDlssSr ? enhancementSize(sourceSize, fitArea) : fitArea;
+        const QSize intermediate = (srModel > 0 ? canDlssSr : canUpscale) ? targetEnhancement : fitArea;
         if(intermediate != upscaleSize)
         {
             waitForFence(fenceValue);
@@ -2557,10 +2968,14 @@ struct Dx12ReplayWindow::Pipeline
             return false;
         }
         bool useSr = srModel && !srFailed && canDlssSr && clean;
-        // Native HDR10 PQ passthrough when display is in Windows HDR mode and no SDR-only NGX/FFX pass is active.
-        hdrPassthroughActive = isPqStream && hdrPassthroughEnabled.load() && displayHdrCapable
-            && !useVsr && !useSr && !wantDlss && !wantFsrFg;
-        updateSwapchainColorSpace(hdrPassthroughActive);
+        // Native HDR10 PQ passthrough when display is in Windows HDR mode and no active SDR-only NGX/FFX pass runs.
+        const bool activeDlssFg = wantDlss && refreshRate >= 119.0;
+        const bool activeFsrFg = wantFsrFg && refreshRate >= 119.0;
+        const bool activeSr = srModel && !srFailed && canDlssSr;
+        const bool wantHdr10 = isPqStream && hdrPassthroughEnabled.load() && displayHdrCapable
+            && !useVsr && !activeSr && !activeDlssFg && !activeFsrFg;
+        updateSwapchainColorSpace(wantHdr10);
+        hdrPassthroughActive = wantHdr10 && (currentSwapchainColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
         hdrToneMapped = isHdrStream && !hdrPassthroughActive;
 
         bool justInitializedNgx = false;
@@ -2652,6 +3067,19 @@ struct Dx12ReplayWindow::Pipeline
         };
 
         const bool hadVsr = vsr != nullptr;
+        if(useVsr && !vsr)
+        {
+            int initStatus = 0;
+            if(!ensureVideoSuperResolution(initStatus))
+            {
+                std::fprintf(stderr, "DX12 RTX VSR initialization failed (0x%08x). Using DX12 shader scaling.\n",
+                    static_cast<unsigned>(initStatus));
+                vsrError = unsigned(initStatus);
+                setVsrQuality(0);
+                return present(hwnd, size, frame, false, refreshRate);
+            }
+            justInitializedNgx = true;
+        }
         beginFrame();
         if(useSr)
         {
@@ -2725,6 +3153,7 @@ struct Dx12ReplayWindow::Pipeline
             {
                 check(graphicsCommands->Close(), "DX12 discard unavailable DLSS FG");
                 std::fprintf(stderr, "DX12 DLSS FG evaluation failed (0x%08x).\n", unsigned(status));
+                releaseGenerationResources();
                 dlssFailed = true;
                 historyValid = false;
                 return present(hwnd, size, frame, false, refreshRate);
@@ -2737,6 +3166,7 @@ struct Dx12ReplayWindow::Pipeline
             {
                 check(graphicsCommands->Close(), "DX12 discard unavailable FSR FG");
                 std::fprintf(stderr, "DX12 FSR FG evaluation failed (%d).\n", status);
+                releaseGenerationResources();
                 fsrFgFailed = true;
                 historyValid = false;
                 return present(hwnd, size, frame, false, refreshRate);
@@ -2764,21 +3194,25 @@ struct Dx12ReplayWindow::Pipeline
             ComPtr<ID3D12Resource> generatedCapture;
             if(!generatedCapturePath.isEmpty())
                 generatedCapture = recordReadback(backBuffer.Get(), generatedLayout);
-            if(submit(&frame) != DXGI_STATUS_OCCLUDED)
-            {
-                genSubmittedAt = std::chrono::steady_clock::now();
-                genPaced = true;
-                ++generatedFrames;
-                if(wantDlss && ++dlssFrames == 1)
-                    std::printf("DX12 DLSS Frame Generation active: 2x.\n");
-                else if(wantFsrFg && ++fsrFgFrames == 1)
-                    std::printf("DX12 FSR Frame Generation active: 2x (%s).\n", fsrFgVersion.c_str());
-            }
+            const HRESULT genPresented = submit(&frame);
             if(generatedCapture)
             {
                 waitForFence(fenceValue, 5000);
                 saveReadback(generatedCapture.Get(), generatedLayout, size, generatedCapturePath);
             }
+            if(genPresented == DXGI_STATUS_OCCLUDED)
+            {
+                ++occluded;
+                historyValid = false;
+                return false;
+            }
+            genSubmittedAt = std::chrono::steady_clock::now();
+            genPaced = true;
+            ++generatedFrames;
+            if(wantDlss && ++dlssFrames == 1)
+                std::printf("DX12 DLSS Frame Generation active: 2x.\n");
+            else if(wantFsrFg && ++fsrFgFrames == 1)
+                std::printf("DX12 FSR Frame Generation active: 2x (%s).\n", fsrFgVersion.c_str());
             backBuffer.Reset();
             if(!waitForPresentSlot(250))
             {
@@ -2807,7 +3241,8 @@ struct Dx12ReplayWindow::Pipeline
         drawOverlay(backBuffer.Get(), size, refreshRate, useVsr, useFsr);
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT capturedLayout{};
         ComPtr<ID3D12Resource> capture;
-        if(!capturePath.isEmpty() && presentedFrames == captureFrame - 1)
+        const unsigned renderedIndex = presentedFrames + occluded;
+        if(!capturePath.isEmpty() && renderedIndex == captureFrame - 1)
             capture = recordReadback(backBuffer.Get(), capturedLayout);
         // Half-frame pacing for 2x Frame Generation:
         // Only apply software sleep when tearing/VRR is active OR display refresh >> 2x stream rate (>=150 Hz);
@@ -2911,13 +3346,24 @@ struct Dx12ReplayWindow::RenderWorker
     std::atomic<bool> preparing{false};
     qreal refresh = 60;
     HANDLE wake = nullptr;
+    HANDLE pauseAckEvent = nullptr;
+    HANDLE resumeEvent = nullptr;
+    std::atomic<bool> pauseRequested{false};
+    std::atomic<bool> releaseSwapchainRequested{false};
     std::thread thread;
 
     explicit RenderWorker(Dx12ReplayWindow *owner) : window(owner)
     {
         wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if(!wake)
+        pauseAckEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        resumeEvent = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+        if(!wake || !pauseAckEvent || !resumeEvent)
+        {
+            if(wake) CloseHandle(wake);
+            if(pauseAckEvent) CloseHandle(pauseAckEvent);
+            if(resumeEvent) CloseHandle(resumeEvent);
             check(HRESULT_FROM_WIN32(GetLastError()), "DX12 render wake event");
+        }
         try
         {
             thread = std::thread([this] { run(); });
@@ -2925,13 +3371,37 @@ struct Dx12ReplayWindow::RenderWorker
         catch(...)
         {
             CloseHandle(wake);
+            CloseHandle(pauseAckEvent);
+            CloseHandle(resumeEvent);
             throw;
         }
+    }
+
+    void pause(bool releaseSwapchain)
+    {
+        if(!thread.joinable() || stopping.load())
+            return;
+        ResetEvent(pauseAckEvent);
+        ResetEvent(resumeEvent);
+        if(releaseSwapchain)
+            releaseSwapchainRequested.store(true);
+        pauseRequested.store(true);
+        SetEvent(wake);
+        WaitForSingleObject(pauseAckEvent, 5000);
+    }
+
+    void resume()
+    {
+        pauseRequested.store(false);
+        SetEvent(resumeEvent);
+        SetEvent(wake);
     }
 
     void finish()
     {
         stopping.store(true);
+        pauseRequested.store(false);
+        SetEvent(resumeEvent);
         SetEvent(wake);
         if(thread.joinable())
             thread.join();
@@ -2943,6 +3413,8 @@ struct Dx12ReplayWindow::RenderWorker
         delete pending.exchange(nullptr);
         delete previous.exchange(nullptr);
         CloseHandle(wake);
+        CloseHandle(pauseAckEvent);
+        CloseHandle(resumeEvent);
     }
 
     void applySettings(Pipeline &pipeline)
@@ -3013,10 +3485,23 @@ struct Dx12ReplayWindow::RenderWorker
         {
             while(true)
             {
-                const DWORD waitTimeout = window->pipeline->showMenu.load() ? 33u : INFINITE;
+                const bool interactiveOverlay = window->pipeline->showMenu.load()
+                    || window->pipeline->bottomDockHovered.load()
+                    || window->pipeline->dockAnim > 0.005f;
+                const DWORD waitTimeout = interactiveOverlay ? 33u : INFINITE;
                 const DWORD waitResult = WaitForSingleObject(wake, waitTimeout);
                 if(waitResult != WAIT_OBJECT_0 && waitResult != WAIT_TIMEOUT)
                     break;
+                if(pauseRequested.load())
+                {
+                    if(releaseSwapchainRequested.exchange(false))
+                        window->pipeline->releaseSwapchain();
+                    SetEvent(pauseAckEvent);
+                    WaitForSingleObject(resumeEvent, INFINITE);
+                    if(stopping.load())
+                        break;
+                    continue;
+                }
                 HWND target;
                 QSize size;
                 QSize warmInput, warmOutput;
@@ -3098,7 +3583,8 @@ struct Dx12ReplayWindow::RenderWorker
                             emit window->firstFramePresented();
                         }
                     }
-                    else if(pipeline.showMenu.load() && !stopping.load())
+                    else if((pipeline.showMenu.load() || pipeline.bottomDockHovered.load() || pipeline.dockAnim > 0.005f)
+                        && !stopping.load())
                     {
                         pipeline.presentOverlayOnly(target, size, hz);
                     }
@@ -3161,15 +3647,13 @@ Dx12ReplayWindow::Dx12ReplayWindow()
                 const bool fsr = (value == 1);
                 worker->requestedSr.store(model);
                 worker->requestedFsr.store(fsr ? 1 : 0);
-                if(!model)
-                    setVsrQuality(vsr);
+                setVsrQuality(vsr);
                 if(settings)
                 {
                     settings->setDx12DlssSr(model);
                     settings->setDx12Fsr(fsr);
                 }
-                if(!model)
-                    emit vsrQualityChanged(vsr);
+                emit vsrQualityChanged(vsr);
                 SetEvent(worker->wake);
                 break;
             }
@@ -3265,6 +3749,23 @@ Dx12ReplayWindow::Dx12ReplayWindow()
     cursorTimer = new QTimer(this);
     cursorTimer->setSingleShot(true);
     connect(cursorTimer, &QTimer::timeout, this, [this] { updateCursorVisibility(false); });
+    dockHideTimer = new QTimer(this);
+    dockHideTimer->setSingleShot(true);
+    connect(dockHideTimer, &QTimer::timeout, this, [this] {
+        if(pipeline->bottomDockHovered.exchange(false))
+        {
+            if(imguiMouseDown)
+            {
+                imguiMouseDown = false;
+                const std::lock_guard<std::mutex> lock(pipeline->inputMutex);
+                if(pipeline->mouseClicks.size() < 64)
+                    pipeline->mouseClicks.push_back(false);
+            }
+            updateCursorVisibility(false);
+            if(worker)
+                SetEvent(worker->wake);
+        }
+    });
     connect(this, &QWindow::screenChanged, this, [this] { updateViewport(); });
 }
 
@@ -3317,21 +3818,30 @@ void Dx12ReplayWindow::applyWindowMode(int mode)
 {
     mode = std::clamp(mode, 0, 2);
     pipeline->windowMode.store(mode);
+    const Qt::WindowFlags desiredFlags = (mode == 1)
+        ? (flags() | Qt::FramelessWindowHint)
+        : (flags() & ~Qt::FramelessWindowHint);
+    const bool flagsChanging = (desiredFlags != flags());
+    if(worker && flagsChanging)
+        worker->pause(true);
     if(mode == 0)
     {
-        setFlags(flags() & ~Qt::FramelessWindowHint);
+        if(flagsChanging)
+            setFlags(desiredFlags);
         showFullScreen();
     }
     else if(mode == 1)
     {
-        setFlags(flags() | Qt::FramelessWindowHint);
+        if(flagsChanging)
+            setFlags(desiredFlags);
         if(auto *scr = screen())
             setGeometry(scr->geometry());
         showNormal();
     }
     else
     {
-        setFlags(flags() & ~Qt::FramelessWindowHint);
+        if(flagsChanging)
+            setFlags(desiredFlags);
         showNormal();
         QRect saved = settings ? settings->streamGeometry() : QRect();
         if(!saved.isValid() || saved.width() < 320 || saved.height() < 180)
@@ -3339,6 +3849,29 @@ void Dx12ReplayWindow::applyWindowMode(int mode)
         setGeometry(saved);
     }
     updateViewport();
+    if(worker && flagsChanging)
+        worker->resume();
+}
+
+void Dx12ReplayWindow::setReplayPreview(int mode, int page)
+{
+    pipeline->displayedFps = 60.0f;
+    pipeline->smoothedRenderMs = 2.8f;
+    pipeline->hudBitrateMbps.store(42.5f);
+    pipeline->hudRttMs.store(4.0f);
+    pipeline->hudGamepadConnected.store(true);
+    pipeline->hudGamepadBattery.store(84);
+    pipeline->hudGamepadCharging.store(false);
+    pipeline->hudGamepadFull.store(false);
+    pipeline->overlayMic.store(true);
+    pipeline->overlayVolume.store(102);
+    pipeline->overlayPage = std::clamp(page, 0, 4);
+    pipeline->showHud.store(mode == 3);
+    pipeline->bottomDockHovered.store(mode == 1 || mode == 3);
+    pipeline->dockAnim = (mode == 1 || mode == 3) ? 1.0f : 0.0f;
+    pipeline->showMenu.store(mode == 2);
+    if(worker)
+        SetEvent(worker->wake);
 }
 
 void Dx12ReplayWindow::setVsrQuality(int quality)
@@ -3365,40 +3898,44 @@ unsigned Dx12ReplayWindow::dlssSrFrames() const
 
 void Dx12ReplayWindow::refreshOverlay()
 {
+    const bool menuOpen = pipeline->showMenu.load();
     if(settings)
     {
         pipeline->showHud.store(settings->showStreamStats()
             || QCoreApplication::instance()->property("ps5linkPsnTestSeconds").toInt() > 0);
         const bool sysVol = settings->volumeControlsSystem();
         pipeline->systemVolumeMode.store(sysVol);
-        if(sysVol)
+        if(!menuOpen)
         {
-            if(pipeline->showMenu.load() || pipeline->topBarHovered.load())
+            if(sysVol)
             {
-                const int v = Ps5LinkGetSystemVolume();
-                if(v >= 0)
-                    pipeline->overlayVolume.store(v);
+                if(pipeline->bottomDockHovered.load())
+                {
+                    const int v = Ps5LinkGetSystemVolume();
+                    if(v >= 0)
+                        pipeline->overlayVolume.store(v);
+                }
             }
+            else
+                pipeline->overlayVolume.store(settings->audioVolume());
+            pipeline->ambientStyle.store(settings->dx12AmbientStyle());
+            pipeline->errorConcealment.store(settings->dx12ErrorConcealment());
+            pipeline->ditherEnabled.store(settings->dx12Dither());
+            pipeline->debandEnabled.store(settings->dx12Deband());
+            pipeline->hdrPassthroughEnabled.store(settings->dx12HdrPassthrough());
+            pipeline->hdrPaperWhite.store(settings->dx12HdrPaperWhite());
+            pipeline->colorContrast.store(settings->dx12Contrast());
+            pipeline->colorSaturation.store(settings->dx12Saturation());
+            pipeline->colorGamma.store(settings->dx12Gamma());
         }
-        else
-            pipeline->overlayVolume.store(settings->audioVolume());
         const int lbMode = settings->lightbarMode();
         pipeline->showLightbarOverlay.store(lbMode == 2 || lbMode == 3);
         pipeline->hideOnScreenControls.store(settings->hideOnScreenControls());
         pipeline->showMicBtn.store(settings->showMicButton());
         pipeline->showAspectBtn.store(settings->showAspectButton());
         pipeline->showVolBtns.store(settings->showVolumeButtons());
-        pipeline->ambientStyle.store(settings->dx12AmbientStyle());
-        pipeline->errorConcealment.store(settings->dx12ErrorConcealment());
         pipeline->touchpadWidth.store(settings->dx12TouchpadWidth());
         pipeline->keyboardDisabled.store(!settings->keyboardEnabled());
-        pipeline->ditherEnabled.store(settings->dx12Dither());
-        pipeline->debandEnabled.store(settings->dx12Deband());
-        pipeline->hdrPassthroughEnabled.store(settings->dx12HdrPassthrough());
-        pipeline->hdrPaperWhite.store(settings->dx12HdrPaperWhite());
-        pipeline->colorContrast.store(settings->dx12Contrast());
-        pipeline->colorSaturation.store(settings->dx12Saturation());
-        pipeline->colorGamma.store(settings->dx12Gamma());
         if(session)
         {
             session->SetKeyboardControllerEnabled(settings->keyboardEnabled());
@@ -3406,10 +3943,52 @@ void Dx12ReplayWindow::refreshOverlay()
                 settings->enableGyroReset(), lbMode);
         }
     }
+    if(Ds5BtManager::instance().isConnected())
+    {
+        pipeline->hudGamepadConnected.store(true);
+        pipeline->hudGamepadBattery.store(Ds5BtManager::instance().batteryPercent());
+        pipeline->hudGamepadCharging.store(Ds5BtManager::instance().isCharging());
+        pipeline->hudGamepadFull.store(Ds5BtManager::instance().isFullyCharged());
+    }
+    else
+    {
+        bool foundPad = false;
+        int batPct = -1;
+        bool chg = false;
+        bool full = false;
+        const int numJoys = SDL_NumJoysticks();
+        for(int i = 0; i < numJoys; ++i)
+        {
+            const SDL_JoystickID jid = SDL_JoystickGetDeviceInstanceID(i);
+            if(jid < 0)
+                continue;
+            if(SDL_Joystick *joy = SDL_JoystickFromInstanceID(jid))
+            {
+                foundPad = true;
+                switch(SDL_JoystickCurrentPowerLevel(joy))
+                {
+                    case SDL_JOYSTICK_POWER_WIRED: chg = true; batPct = -1; break;
+                    case SDL_JOYSTICK_POWER_MAX:
+                    case SDL_JOYSTICK_POWER_FULL: batPct = 100; full = true; break;
+                    case SDL_JOYSTICK_POWER_MEDIUM: batPct = 65; break;
+                    case SDL_JOYSTICK_POWER_LOW: batPct = 25; break;
+                    case SDL_JOYSTICK_POWER_EMPTY: batPct = 5; break;
+                    default: break;
+                }
+                break;
+            }
+        }
+        pipeline->hudGamepadConnected.store(foundPad);
+        pipeline->hudGamepadBattery.store(batPct);
+        pipeline->hudGamepadCharging.store(chg);
+        pipeline->hudGamepadFull.store(full);
+    }
     if(session)
     {
         pipeline->lightbarRgb.store(session->GetLightbarRgb());
         pipeline->hudPacketLossPct.store(float(session->GetAveragePacketLoss() * 100.0));
+        pipeline->hudBitrateMbps.store(float(session->GetMeasuredBitrate()));
+        pipeline->hudRttMs.store(float(session->GetRttMs()));
         pipeline->hudCorruptFrames.store(session->GetCorruptDecodedFrames());
         pipeline->overlayMic.store(!session->GetMuted());
         const auto text = tr("Video %1 Mbps | RTT %2 ms | Packet loss %3%\n%4")
@@ -3482,6 +4061,10 @@ void Dx12ReplayWindow::keyPressEvent(QKeyEvent *event)
 
 void Dx12ReplayWindow::keyReleaseEvent(QKeyEvent *event)
 {
+    if((event->key() == Qt::Key_F11 && event->modifiers() == Qt::NoModifier)
+        || ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
+            && event->modifiers() == Qt::AltModifier))
+        return;
     if(pipeline->showMenu.load())
     {
         if(const auto key = mapMenuKey(event->key()); key != ImGuiKey_None)
@@ -3505,6 +4088,17 @@ void Dx12ReplayWindow::openSettings()
         session->HandleNormalizedTouchpad(0, 0.5f, 0.5f, touchpadMouseClickBtn);
         touchpadMouseActive = false;
         touchpadMouseClickBtn = false;
+        touchpadMouseButton = Qt::NoButton;
+    }
+    if(dockHideTimer)
+        dockHideTimer->stop();
+    pipeline->bottomDockHovered.store(false);
+    if(!visible && imguiMouseDown)
+    {
+        imguiMouseDown = false;
+        const std::lock_guard<std::mutex> lock(pipeline->inputMutex);
+        if(pipeline->mouseClicks.size() < 64)
+            pipeline->mouseClicks.push_back(false);
     }
     pipeline->showMenu.store(visible);
     setProperty("ps5linkDx12MenuOpen", visible);
@@ -3519,7 +4113,7 @@ void Dx12ReplayWindow::updateCursorVisibility(bool userMovedMouse)
 {
     const bool allowHide = (!settings || settings->hideCursor())
         && !pipeline->showMenu.load()
-        && !pipeline->topBarHovered.load()
+        && !pipeline->bottomDockHovered.load()
         && !pipeline->splitScreen.load();
     if(userMovedMouse || !allowHide)
     {
@@ -3545,13 +4139,60 @@ void Dx12ReplayWindow::updateCursorVisibility(bool userMovedMouse)
 
 void Dx12ReplayWindow::feedMouse(QMouseEvent *event, int buttonState)
 {
-    const bool overTopBar = !pipeline->showMenu.load() && !pipeline->hideOnScreenControls.load()
-        && !touchpadMouseActive
-        && event->position().y() >= 0.0 && event->position().y() < 64.0;
-    pipeline->topBarHovered.store(overTopBar);
-    updateCursorVisibility(true);
-    if(!pipeline->showMenu.load() && (!overTopBar || touchpadMouseActive))
+    const bool menuOpen = pipeline->showMenu.load();
+    if(menuOpen && buttonState == 1 && event->button() == Qt::LeftButton && !pipeline->menuPopupOpen.load())
     {
+        const QPointF phys = event->position() * devicePixelRatio();
+        const float ml = pipeline->menuLeftPx.load();
+        const float mt = pipeline->menuTopPx.load();
+        const float mr = pipeline->menuRightPx.load();
+        const float mb = pipeline->menuBottomPx.load();
+        if(mr > ml && mb > mt
+            && (phys.x() < ml || phys.x() > mr || phys.y() < mt || phys.y() > mb))
+        {
+            openSettings();
+            event->accept();
+            return;
+        }
+    }
+    const bool dockAllowed = !menuOpen && !pipeline->hideOnScreenControls.load() && !touchpadMouseActive && height() > 0;
+    const double distFromBottom = double(height()) - event->position().y();
+    const bool currentlyHovered = pipeline->bottomDockHovered.load();
+    const double triggerZone = currentlyHovered ? 116.0 : 60.0;
+    const bool inBottomZone = dockAllowed && event->position().y() >= 0.0
+        && distFromBottom >= 0.0 && distFromBottom <= triggerZone;
+    if(inBottomZone)
+    {
+        if(dockHideTimer)
+            dockHideTimer->stop();
+        pipeline->bottomDockHovered.store(true);
+    }
+    else if(currentlyHovered)
+    {
+        if(buttonState == 1 || !dockAllowed)
+        {
+            if(dockHideTimer)
+                dockHideTimer->stop();
+            pipeline->bottomDockHovered.store(false);
+        }
+        else if(dockHideTimer && !dockHideTimer->isActive())
+        {
+            dockHideTimer->start(650);
+        }
+    }
+    const bool overBottomDock = inBottomZone || (pipeline->bottomDockHovered.load() && buttonState != 1);
+    updateCursorVisibility(true);
+    if(!menuOpen && (!overBottomDock || touchpadMouseActive))
+    {
+        if(imguiMouseDown && buttonState == 0 && event->button() == Qt::LeftButton)
+        {
+            imguiMouseDown = false;
+            const std::lock_guard<std::mutex> lock(pipeline->inputMutex);
+            if(pipeline->mouseClicks.size() < 64)
+                pipeline->mouseClicks.push_back(false);
+            if(worker)
+                SetEvent(worker->wake);
+        }
         // Allow interactive A/B split-screen line dragging directly over the stream.
         if(!touchpadMouseActive && pipeline->splitScreen.load() && width() > 0 && (event->buttons() & Qt::LeftButton))
         {
@@ -3579,6 +4220,7 @@ void Dx12ReplayWindow::feedMouse(QMouseEvent *event, int buttonState)
                         const bool clickBtn = (event->button() != Qt::LeftButton);
                         touchpadMouseActive = true;
                         touchpadMouseClickBtn = clickBtn;
+                        touchpadMouseButton = event->button();
                         session->HandleNormalizedTouchpad(1, normX, normY, clickBtn);
                     }
                 }
@@ -3589,11 +4231,12 @@ void Dx12ReplayWindow::feedMouse(QMouseEvent *event, int buttonState)
                         if(!touchpadMouseClickBtn && (event->buttons() & Qt::LeftButton))
                             session->HandleNormalizedTouchpad(-1, normX, normY, false);
                     }
-                    else if(buttonState == 0)
+                    else if(buttonState == 0 && (event->button() == touchpadMouseButton || touchpadMouseButton == Qt::NoButton))
                     {
                         session->HandleNormalizedTouchpad(0, normX, normY, touchpadMouseClickBtn);
                         touchpadMouseActive = false;
                         touchpadMouseClickBtn = false;
+                        touchpadMouseButton = Qt::NoButton;
                     }
                 }
             }
@@ -3603,7 +4246,10 @@ void Dx12ReplayWindow::feedMouse(QMouseEvent *event, int buttonState)
     const std::lock_guard<std::mutex> lock(pipeline->inputMutex);
     pipeline->mousePosition = event->position() * devicePixelRatio();
     if(buttonState >= 0 && event->button() == Qt::LeftButton && pipeline->mouseClicks.size() < 64)
-        pipeline->mouseClicks.push_back(buttonState != 0);
+    {
+        imguiMouseDown = (buttonState != 0);
+        pipeline->mouseClicks.push_back(imguiMouseDown);
+    }
     if(worker)
         SetEvent(worker->wake);
     event->accept();
@@ -3631,7 +4277,7 @@ void Dx12ReplayWindow::wheelEvent(QWheelEvent *event)
 void Dx12ReplayWindow::mouseDoubleClickEvent(QMouseEvent *event)
 {
     if(settings && settings->fullscreenDoubleClick() && !pipeline->showMenu.load()
-        && !pipeline->topBarHovered.load() && !pipeline->splitScreen.load()
+        && !pipeline->bottomDockHovered.load() && !pipeline->splitScreen.load()
         && event->button() == Qt::LeftButton)
     {
         const int nextMode = pipeline->windowMode.load() == 2 ? 0 : 2;
@@ -3645,16 +4291,34 @@ void Dx12ReplayWindow::mouseDoubleClickEvent(QMouseEvent *event)
 
 bool Dx12ReplayWindow::event(QEvent *ev)
 {
-    if(ev && ev->type() == QEvent::FocusOut && touchpadMouseActive && session)
+    if(ev && ev->type() == QEvent::Leave)
     {
-        session->HandleNormalizedTouchpad(0, 0.5f, 0.5f, touchpadMouseClickBtn);
-        touchpadMouseActive = false;
-        touchpadMouseClickBtn = false;
+        if(pipeline->bottomDockHovered.load() && dockHideTimer && !dockHideTimer->isActive())
+            dockHideTimer->start(650);
+    }
+    if(ev && ev->type() == QEvent::FocusOut)
+    {
+        if(touchpadMouseActive && session)
+        {
+            session->HandleNormalizedTouchpad(0, 0.5f, 0.5f, touchpadMouseClickBtn);
+            touchpadMouseActive = false;
+            touchpadMouseClickBtn = false;
+            touchpadMouseButton = Qt::NoButton;
+        }
+        if(imguiMouseDown)
+        {
+            imguiMouseDown = false;
+            const std::lock_guard<std::mutex> lock(pipeline->inputMutex);
+            if(pipeline->mouseClicks.size() < 64)
+                pipeline->mouseClicks.push_back(false);
+            if(worker)
+                SetEvent(worker->wake);
+        }
     }
     if(ev && (ev->type() == QEvent::TouchBegin || ev->type() == QEvent::TouchUpdate
         || ev->type() == QEvent::TouchEnd || ev->type() == QEvent::TouchCancel))
     {
-        if(session && !pipeline->showMenu.load() && !pipeline->topBarHovered.load()
+        if(session && !pipeline->showMenu.load() && !pipeline->bottomDockHovered.load()
             && !pipeline->splitScreen.load() && width() > 0 && height() > 0)
         {
             session->HandleTouchEvent(static_cast<QTouchEvent *>(ev), width(), height());

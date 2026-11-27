@@ -18,12 +18,14 @@ typedef struct ps5link_qos_version_t {
 typedef BOOL (WINAPI *FnQOSCreateHandle)(Ps5LinkQosVersion *Version, PHANDLE QOSHandle);
 typedef BOOL (WINAPI *FnQOSAddSocketToFlow)(HANDLE QOSHandle, SOCKET Socket, struct sockaddr *DestAddr,
 	DWORD TrafficType, DWORD Flags, PULONG FlowId);
+typedef BOOL (WINAPI *FnQOSRemoveSocketFromFlow)(HANDLE QOSHandle, SOCKET Socket, ULONG FlowId, DWORD Flags);
 
-static HANDLE ps5link_get_qwave_handle(FnQOSAddSocketToFlow *out_add_flow)
+static HANDLE ps5link_get_qwave_handle(FnQOSAddSocketToFlow *out_add_flow, FnQOSRemoveSocketFromFlow *out_remove_flow)
 {
 	static LONG init_state = 0; // 0=uninit, 1=initing, 2=done
 	static HANDLE qos_handle = NULL;
 	static FnQOSAddSocketToFlow add_flow_fn = NULL;
+	static FnQOSRemoveSocketFromFlow remove_flow_fn = NULL;
 
 	if(InterlockedCompareExchange(&init_state, 1, 0) == 0)
 	{
@@ -32,6 +34,7 @@ static HANDLE ps5link_get_qwave_handle(FnQOSAddSocketToFlow *out_add_flow)
 		{
 			FnQOSCreateHandle create_fn = (FnQOSCreateHandle)(void *)GetProcAddress(lib, "QOSCreateHandle");
 			add_flow_fn = (FnQOSAddSocketToFlow)(void *)GetProcAddress(lib, "QOSAddSocketToFlow");
+			remove_flow_fn = (FnQOSRemoveSocketFromFlow)(void *)GetProcAddress(lib, "QOSRemoveSocketFromFlow");
 			if(create_fn && add_flow_fn)
 			{
 				Ps5LinkQosVersion ver = { 1, 0 };
@@ -48,6 +51,8 @@ static HANDLE ps5link_get_qwave_handle(FnQOSAddSocketToFlow *out_add_flow)
 	}
 	if(out_add_flow)
 		*out_add_flow = add_flow_fn;
+	if(out_remove_flow)
+		*out_remove_flow = remove_flow_fn;
 	return qos_handle;
 }
 
@@ -180,11 +185,11 @@ static ULONG find_physical_ipv4_interface_if_tun_active(WCHAR *out_name, size_t 
 }
 #endif
 
-CHIAKI_EXPORT void chiaki_socket_apply_qos(chiaki_socket_t sock, ChiakiLog *log)
+CHIAKI_EXPORT uint32_t chiaki_socket_apply_qos(chiaki_socket_t sock, ChiakiLog *log)
 {
 #ifdef _WIN32
 	if(CHIAKI_SOCKET_IS_INVALID(sock))
-		return;
+		return 0;
 	struct sockaddr_storage peer;
 	int peer_len = sizeof(peer);
 	const bool has_peer = getpeername(sock, (struct sockaddr *)&peer, &peer_len) == 0;
@@ -195,7 +200,7 @@ CHIAKI_EXPORT void chiaki_socket_apply_qos(chiaki_socket_t sock, ChiakiLog *log)
 		setsockopt(sock, IPPROTO_IP, IP_TOS, (const char *)&tos, sizeof(tos));
 	}
 	FnQOSAddSocketToFlow add_flow = NULL;
-	HANDLE qos = ps5link_get_qwave_handle(&add_flow);
+	HANDLE qos = ps5link_get_qwave_handle(&add_flow, NULL);
 	if(qos && add_flow && has_peer)
 	{
 		// QOSTrafficTypeAudioVideo = 3, QOS_NON_ADAPTIVE_FLOW = 2
@@ -204,11 +209,29 @@ CHIAKI_EXPORT void chiaki_socket_apply_qos(chiaki_socket_t sock, ChiakiLog *log)
 		{
 			if(log)
 				CHIAKI_LOGI(log, "PS5Link enabled Windows qWave AudioVideo QoS flow #%lu", (unsigned long)flow_id);
+			return (uint32_t)flow_id;
 		}
 	}
+	return 0;
 #else
 	(void)sock;
 	(void)log;
+	return 0;
+#endif
+}
+
+CHIAKI_EXPORT void chiaki_socket_remove_qos(chiaki_socket_t sock, uint32_t flow_id)
+{
+#ifdef _WIN32
+	if(!flow_id || CHIAKI_SOCKET_IS_INVALID(sock))
+		return;
+	FnQOSRemoveSocketFromFlow remove_flow = NULL;
+	HANDLE qos = ps5link_get_qwave_handle(NULL, &remove_flow);
+	if(qos && remove_flow)
+		remove_flow(qos, (SOCKET)sock, (ULONG)flow_id, 0);
+#else
+	(void)sock;
+	(void)flow_id;
 #endif
 }
 
@@ -239,7 +262,8 @@ CHIAKI_EXPORT void chiaki_socket_bypass_tun(chiaki_socket_t sock, int family, Ch
 		if(log)
 		{
 			char utf8_name[128] = {0};
-			WideCharToMultiByte(CP_UTF8, 0, if_name, -1, utf8_name, sizeof(utf8_name), NULL, NULL);
+			WideCharToMultiByte(CP_UTF8, 0, if_name, -1, utf8_name, (int)(sizeof(utf8_name) - 1), NULL, NULL);
+			utf8_name[sizeof(utf8_name) - 1] = '\0';
 			CHIAKI_LOGI(log, "PS5Link bypassed local TUN via direct physical interface #%lu (%s)",
 				(unsigned long)if_index, utf8_name[0] ? utf8_name : "physical");
 		}

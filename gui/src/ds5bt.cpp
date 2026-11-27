@@ -205,21 +205,67 @@ std::string extractBluetoothAddressFromText(const std::string &text)
 	return {};
 }
 
-// The HID path can also contain controller or adapter IDs. Only use a
-// Bluetooth device ancestor as the target of the OS disconnect request.
+// Resolve the controller's Bluetooth MAC address from its Windows PnP ancestor chain.
+// On Windows, HID\{00001124-...} has parent BTHENUM\{00001124-...}\...&<12HEX>_C00000000
+// (which exposes DEVPKEY_Bluetooth_DeviceAddress), while BTHENUM\DEV_<12HEX> is a sibling.
 uint64_t bluetoothDeviceAddress(DEVINST device)
 {
-	constexpr char prefix[] = "bthenum\\dev_";
+	static constexpr DEVPROPKEY kBluetoothDeviceAddressKey = {
+		{0x2BD67D8B, 0x8BEB, 0x48D5, {0x87, 0xE0, 0x6C, 0xDA, 0x34, 0x28, 0x04, 0x0A}}, 1
+	};
+	constexpr char devPrefix[] = "bthenum\\dev_";
+	constexpr char bthEnumPrefix[] = "bthenum\\";
 	for(unsigned depth = 0; depth < 16; ++depth)
 	{
+		DEVPROPTYPE propType = 0;
+		wchar_t propBuf[64]{};
+		ULONG propSize = sizeof(propBuf);
+		if(CM_Get_DevNode_PropertyW(device, &kBluetoothDeviceAddressKey, &propType,
+				reinterpret_cast<PBYTE>(propBuf), &propSize, 0) == CR_SUCCESS
+			&& propType == DEVPROP_TYPE_STRING)
+		{
+			std::string hex;
+			hex.reserve(12);
+			for(size_t i = 0; i < std::size(propBuf) && propBuf[i] != L'\0'; ++i)
+			{
+				const wchar_t ch = propBuf[i];
+				if(ch < 128 && isHexChar(static_cast<char>(ch)))
+					hex.push_back(static_cast<char>(ch));
+			}
+			if(hex.size() == 12 && hex != "000000000000")
+				return std::stoull(hex, nullptr, 16);
+		}
+
 		char id[MAX_DEVICE_ID_LEN]{};
 		if(CM_Get_Device_IDA(device, id, MAX_DEVICE_ID_LEN, 0) != CR_SUCCESS)
 			break;
 		const auto name = toLowerAscii(id);
-		constexpr size_t start = sizeof(prefix) - 1;
-		if(name.compare(0, start, prefix) == 0 && name.size() > start + 12 && name[start + 12] == '\\'
-			&& std::all_of(name.begin() + start, name.begin() + start + 12, isHexChar))
-			return std::stoull(name.substr(start, 12), nullptr, 16);
+		constexpr size_t devStart = sizeof(devPrefix) - 1;
+		if(name.compare(0, devStart, devPrefix) == 0 && name.size() > devStart + 12 && name[devStart + 12] == '\\'
+			&& std::all_of(name.begin() + devStart, name.begin() + devStart + 12, isHexChar))
+			return std::stoull(name.substr(devStart, 12), nullptr, 16);
+
+		constexpr size_t bthStart = sizeof(bthEnumPrefix) - 1;
+		if(name.compare(0, bthStart, bthEnumPrefix) == 0)
+		{
+			// Instance ID format: BTHENUM\{00001124-...}_VID&..._PID&...\7&...&0&<12HEX>_C00000000
+			const size_t slash = name.rfind('\\');
+			if(slash != std::string::npos)
+			{
+				const std::string instance = name.substr(slash + 1);
+				const std::string mac = extractBluetoothAddressFromText(instance);
+				if(mac.size() == 17)
+				{
+					std::string hex;
+					hex.reserve(12);
+					for(char ch : mac)
+						if(ch != ':')
+							hex.push_back(ch);
+					if(hex.size() == 12 && hex != "000000000000")
+						return std::stoull(hex, nullptr, 16);
+				}
+			}
+		}
 
 		DEVINST parent;
 		if(CM_Get_Parent(&parent, device, 0) != CR_SUCCESS)
@@ -227,6 +273,15 @@ uint64_t bluetoothDeviceAddress(DEVINST device)
 		device = parent;
 	}
 	return 0;
+}
+
+std::string formatBluetoothAddress(uint64_t address)
+{
+	if(!address)
+		return {};
+	char hex[13]{};
+	std::snprintf(hex, sizeof(hex), "%012llx", static_cast<unsigned long long>(address & 0xFFFFFFFFFFFFULL));
+	return formatMac12(hex);
 }
 
 bool requestBluetoothDisconnect(uint64_t address, const std::function<bool()> &stillIdle)
@@ -481,6 +536,7 @@ struct Ds5BtManager::Impl
 	ChiakiAccelNewZero realAccel{};
 	ChiakiControllerState controllerState{};
 	int8_t fingerTouchId[2] = {-1, -1};
+	uint8_t lastHwTouchId[2] = {0xFF, 0xFF};
 	uint32_t lastRawSensorTimestamp = 0;
 	bool hasRawSensorTimestamp = false;
 	uint64_t motionTimestampUs = 0;
@@ -633,6 +689,7 @@ struct Ds5BtManager::Impl
 		reportSequence = 0;
 		packetSequence = 0;
 		micPacketSequence = 0;
+		micToggleDirty = (desiredMicActive && !desiredMicMuted);
 	}
 
 	void applyAudioRoutingFlagsLocked()
@@ -870,13 +927,30 @@ struct Ds5BtManager::Impl
 		if(featureHandle == INVALID_HANDLE_VALUE || featureReportLength < 41)
 			return;
 
+		static constexpr uint8_t kFeature05Seed = 0xA3;
 		std::vector<uint8_t> featureBuf(std::max<size_t>(featureReportLength, 64), 0);
-		featureBuf[0] = 0x05;
-		if(HidD_GetFeature(featureHandle, featureBuf.data(), static_cast<ULONG>(featureBuf.size())))
+		for(int attempt = 0; attempt < 3; ++attempt)
 		{
+			std::fill(featureBuf.begin(), featureBuf.end(), 0);
+			featureBuf[0] = 0x05;
+			if(!HidD_GetFeature(featureHandle, featureBuf.data(), static_cast<ULONG>(featureBuf.size())))
+				continue;
+			uint8_t prefixed[38];
+			prefixed[0] = kFeature05Seed;
+			std::memcpy(&prefixed[1], featureBuf.data(), 37);
+			const uint32_t expectedCrc = readLe32(&featureBuf[37]);
+			const uint32_t actualCrc = crc32Seeded(prefixed, sizeof(prefixed), 0);
+			if(actualCrc != expectedCrc)
+			{
+				std::fprintf(stderr, "[PS5Link] DualSense BT Feature 0x05 CRC mismatch (attempt %d/3).\n", attempt + 1);
+				continue;
+			}
 			imuCal = parseFeature05Calibration(featureBuf.data(), featureBuf.size());
 			if(imuCal.valid)
+			{
 				std::fprintf(stdout, "[PS5Link] DualSense Bluetooth IMU calibration (Feature 0x05) loaded.\n");
+				return;
+			}
 		}
 	}
 
@@ -932,9 +1006,9 @@ struct Ds5BtManager::Impl
 
 	void handleSimpleIdleReport(const uint8_t *raw)
 	{
-		// Basic Bluetooth reports put the buttons before the triggers, and
-		// carry a packet counter in the upper bits of the third button byte.
-		const bool buttons = (raw[5] & 0x0fu) < 8 || (raw[5] & 0xf0u) || raw[6] || (raw[7] & 0x07u);
+		// Basic Bluetooth reports put 14 buttons before the triggers: raw[7] bits 0..1 are
+		// PS and Touchpad click, while bits 2..7 carry a 6-bit incrementing packet counter.
+		const bool buttons = (raw[5] & 0x0fu) < 8 || (raw[5] & 0xf0u) || raw[6] || (raw[7] & 0x03u);
 		const bool sticks = std::any_of(raw + 1, raw + 5,
 			[](uint8_t axis) { return std::abs(int(axis) - 128) >= 16; });
 		const bool triggers = raw[8] >= 8 || raw[9] >= 8;
@@ -1015,7 +1089,8 @@ struct Ds5BtManager::Impl
 			std::lock_guard<std::mutex> lock(mutex);
 			if(idlePolicy.enabled)
 				idleTimer.observe(Ds5BtIdleTimer::Clock::now(),
-					activeButtons || activeSticks || activeTriggers || activeTouch || activeMotion, isChg);
+					activeButtons || activeSticks || activeTriggers || activeTouch || activeMotion,
+					isChg || isFull);
 		}
 		if(passive)
 			return;
@@ -1113,14 +1188,23 @@ struct Ds5BtManager::Impl
 			{
 				const uint8_t *tp = &u[33 + f * 4];
 				const bool active = (tp[0] & 0x80u) == 0;
+				const uint8_t hwId = static_cast<uint8_t>(tp[0] & 0x7Fu);
 				if(active)
 				{
 					uint16_t x = static_cast<uint16_t>(tp[1]) | (static_cast<uint16_t>(tp[2] & 0x0Fu) << 8);
 					uint16_t y = static_cast<uint16_t>((tp[2] >> 4) & 0x0Fu) | (static_cast<uint16_t>(tp[3]) << 4);
 					x = std::min<uint16_t>(x, 1919);
 					y = std::min<uint16_t>(y, 1079);
+					if(fingerTouchId[f] >= 0 && lastHwTouchId[f] != hwId)
+					{
+						chiaki_controller_state_stop_touch(&controllerState, static_cast<uint8_t>(fingerTouchId[f]));
+						fingerTouchId[f] = -1;
+					}
 					if(fingerTouchId[f] < 0)
+					{
 						fingerTouchId[f] = chiaki_controller_state_start_touch(&controllerState, x, y);
+						lastHwTouchId[f] = hwId;
+					}
 					else
 						chiaki_controller_state_set_touch_pos(&controllerState, static_cast<uint8_t>(fingerTouchId[f]), x, y);
 				}
@@ -1128,6 +1212,7 @@ struct Ds5BtManager::Impl
 				{
 					chiaki_controller_state_stop_touch(&controllerState, static_cast<uint8_t>(fingerTouchId[f]));
 					fingerTouchId[f] = -1;
+					lastHwTouchId[f] = 0xFF;
 				}
 			}
 
@@ -1261,6 +1346,7 @@ struct Ds5BtManager::Impl
 				bool hasHapticsBlock = false;
 				std::array<uint8_t, kHapticsBlockSize> hapticsBlock{};
 
+				bool hapticsIdleTimedOut = false;
 				{
 					std::lock_guard<std::mutex> lock(audioHapticsMutex);
 					if(!pendingSpeakerPackets.empty())
@@ -1284,6 +1370,18 @@ struct Ds5BtManager::Impl
 						if(trailingZeroHapticsPackets == 0)
 							voiceCoilHapticsActive = false;
 					}
+					else if(voiceCoilHapticsActive
+						&& now - lastHapticsPushTime >= std::chrono::milliseconds(80))
+					{
+						hapticsPcmFifo.clear();
+						voiceCoilHapticsActive = false;
+						hapticsIdleTimedOut = true;
+					}
+				}
+				if(hapticsIdleTimedOut)
+				{
+					std::lock_guard<std::mutex> stateLock(outputStateMutex);
+					stateReportDirty = true;
 				}
 
 				if(spkMode && !hasHapticsBlock)
@@ -1372,7 +1470,7 @@ struct Ds5BtManager::Impl
 					WaitForMultipleObjects(2, waits, FALSE, 5);
 				}
 			}
-			else
+			else if(!timer && sleepDur.count() > 0)
 			{
 				std::this_thread::sleep_for(std::chrono::milliseconds(1));
 			}
@@ -1423,6 +1521,12 @@ struct Ds5BtManager::Impl
 			btAddress.clear();
 			idleDeviceAddress = 0;
 			idleTimer = {};
+			chiaki_controller_state_set_idle(&controllerState);
+			chiaki_orientation_tracker_init(&orientationTracker);
+			chiaki_accel_new_zero_set_inactive(&accelZero, false);
+			chiaki_accel_new_zero_set_inactive(&realAccel, true);
+			motionTimestampUs = 0;
+			lastRawSensorTimestamp = 0;
 		}
 		batteryPct.store(-1, std::memory_order_relaxed);
 		charging.store(false, std::memory_order_relaxed);
@@ -1431,8 +1535,11 @@ struct Ds5BtManager::Impl
 		headsetMicPlugged.store(false, std::memory_order_relaxed);
 		fingerTouchId[0] = -1;
 		fingerTouchId[1] = -1;
+		lastHwTouchId[0] = 0xFF;
+		lastHwTouchId[1] = 0xFF;
 		hasRawSensorTimestamp = false;
 		prevMicButtonDown = false;
+		pendingMicButtonPress.store(false, std::memory_order_relaxed);
 	}
 
 	static DWORD CALLBACK onHidChange(HCMNOTIFICATION, PVOID context, CM_NOTIFY_ACTION, PCM_NOTIFY_EVENT_DATA, DWORD)
@@ -1624,6 +1731,8 @@ struct Ds5BtManager::Impl
 				foundFeatLen = caps.FeatureReportByteLength;
 				foundBtAddress = extractBluetoothAddressFromText(path);
 				foundIdleAddress = bluetoothDeviceAddress(devData.DevInst);
+				if(foundBtAddress.empty() && foundIdleAddress)
+					foundBtAddress = formatBluetoothAddress(foundIdleAddress);
 			}
 		}
 
@@ -1999,15 +2108,15 @@ void Ds5BtManager::setLedColor(uint8_t r, uint8_t g, uint8_t b, uint8_t brightne
 
 void Ds5BtManager::setPlayerIndex(uint8_t index)
 {
-	// DualSense 5-LED bar patterns for player 1..4
+	// DualSense 5-LED bar patterns for 0-based player index (matching SDL / StreamSession)
 	static constexpr uint8_t kPlayerMasks[] = {
-		0x00, // 0: off
-		0x04, // 1: --X--
-		0x0A, // 2: -X-X-
-		0x15, // 3: X-X-X
-		0x1B  // 4: XX-XX
+		0x04, // 0 (Player 1): --X--
+		0x0A, // 1 (Player 2): -X-X-
+		0x15, // 2 (Player 3): X-X-X
+		0x1B, // 3 (Player 4): XX-XX
+		0x1F  // 4 (Player 5): XXXXX
 	};
-	const uint8_t mask = (index <= 4) ? kPlayerMasks[index] : kPlayerMasks[1];
+	const uint8_t mask = (index < std::size(kPlayerMasks)) ? kPlayerMasks[index] : kPlayerMasks[0];
 	std::lock_guard<std::mutex> lock(impl_->outputStateMutex);
 	impl_->playerIndicators = mask;
 	impl_->dsState[1] |= 0x10; // allow_player_indicators
@@ -2032,6 +2141,16 @@ void Ds5BtManager::setMicState(bool streamActive, bool muted)
 		impl_->applyAudioRoutingFlagsLocked();
 		impl_->stateReportDirty = true;
 	}
+}
+
+void Ds5BtManager::setMicMuted(bool muted)
+{
+	bool streamActive = false;
+	{
+		std::lock_guard<std::mutex> lock(impl_->outputStateMutex);
+		streamActive = impl_->desiredMicActive;
+	}
+	setMicState(streamActive, muted);
 }
 
 void Ds5BtManager::pushHaptics3kHz(const int16_t *stereoSamples, size_t stereoFrames, float gain)

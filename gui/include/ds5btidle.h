@@ -35,7 +35,7 @@ public:
     bool expired(Clock::time_point now, const Ds5BtIdlePolicy &policy, bool streaming) const
     {
         const int minutes = streaming ? policy.streamMinutes : policy.desktopMinutes;
-        if(!policy.enabled || minutes == 0 || !hasReport || now - lastReport > freshness
+        if(!policy.enabled || minutes <= 0 || !hasReport || now - lastReport > freshness
             || (policy.keepWhileCharging && isCharging))
             return false;
         const auto since = policy.keepWhileCharging && lastCharging > lastActivity ? lastCharging : lastActivity;

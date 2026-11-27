@@ -44,6 +44,8 @@ private:
     Texture input, output;
     pl_vulkan_sem timeline{};
     uint64_t timelineValue = 0;
+    uint64_t submittedTimelineValue = 0;
+    PFN_vkGetDeviceProcAddr getDeviceProcAddr = nullptr;
     bool failed = false;
     bool active = false;
 

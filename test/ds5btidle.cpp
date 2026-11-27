@@ -38,6 +38,7 @@ int main()
         timer.observe(start + std::chrono::seconds(second), false, false);
     ok &= expect(!timer.expired(start + 245s, {false, 1, 1, false}, false), "Disabling auto-disconnect must bypass the timer.");
     ok &= expect(!timer.expired(start + 245s, {true, 0, 1, false}, false), "Never must disable only the applicable timer.");
+    ok &= expect(!timer.expired(start + 245s, {true, -5, 1, false}, false), "Negative interval must never immediately disconnect.");
     timer.restart(start + 245s);
     ok &= expect(!timer.expired(start + 245s, policy, false), "A mode or policy change must reset the timer.");
     return ok ? 0 : 1;

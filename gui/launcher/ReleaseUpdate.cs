@@ -43,13 +43,13 @@ internal static class ReleaseUpdate
         return string.Equals(installed, current, StringComparison.OrdinalIgnoreCase) ? installed : null;
     }
 
-    internal static bool OtherInstanceIsRunning(string installDirectory)
+    internal static bool OtherInstanceIsRunning(string installDirectory, int? excludedProcessId = null)
     {
         foreach (var process in Process.GetProcessesByName("PS5Link").Concat(Process.GetProcessesByName("PS5LinkLauncher")))
         {
             using (process)
             {
-                if (process.Id == Environment.ProcessId)
+                if (process.Id == Environment.ProcessId || (excludedProcessId is int skip && process.Id == skip))
                     continue;
                 try
                 {
@@ -62,6 +62,20 @@ internal static class ReleaseUpdate
             }
         }
         return false;
+    }
+
+    internal static void CleanupStaleInstaller()
+    {
+        try
+        {
+            string installer = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "PS5Link", "Updates", "PS5Link-update.exe");
+            if (File.Exists(installer))
+                File.Delete(installer);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     internal static async Task<Release?> CheckAsync(CancellationToken token)

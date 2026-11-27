@@ -769,6 +769,7 @@ signals:
     void showAspectButtonChanged();
     void showVolumeButtonsChanged();
     void alwaysRequestIdrChanged();
+    void videoSettingsReset();
 #endif
     void streamerModeChanged();
     void fpsLocalPS4Changed();

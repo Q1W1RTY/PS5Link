@@ -1,6 +1,9 @@
 #include "qmlmainwindow.h"
 #ifdef PS5LINK_BUILD
 #include <rtxvsr.h>
+#ifdef _WIN32
+#include <ds5bt.h>
+#endif
 #endif
 #include "qmlbackend.h"
 #include "qmlsvgprovider.h"
@@ -21,6 +24,7 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
+#include <SDL.h>
 }
 
 #include <QByteArray>
@@ -2872,6 +2876,9 @@ void QmlMainWindow::setKeepVideo(bool keep)
 
 void QmlMainWindow::grabInput()
 {
+#ifdef PS5LINK_BUILD
+    setBottomDockHovered(false);
+#endif
     setCursor(Qt::ArrowCursor);
     grab_input++;
     if (session)
@@ -2883,11 +2890,120 @@ void QmlMainWindow::releaseInput()
     if (!grab_input)
         return;
     grab_input--;
-    if (!grab_input && has_video && settings->GetHideCursor())
+    if (!grab_input && has_video && settings->GetHideCursor()
+#ifdef PS5LINK_BUILD
+        && !bottom_dock_hovered
+#endif
+    )
         setCursor(Qt::BlankCursor);
     if (session)
         session->BlockInput(grab_input);
 }
+
+#ifdef PS5LINK_BUILD
+void QmlMainWindow::setBottomDockHovered(bool hovered)
+{
+    if (dock_hide_timer)
+        dock_hide_timer->stop();
+    if (bottom_dock_hovered == hovered)
+        return;
+    bottom_dock_hovered = hovered;
+    if (hovered)
+    {
+        setCursor(Qt::ArrowCursor);
+        refreshLiveTelemetry();
+    }
+    else if (!grab_input && has_video && settings->GetHideCursor())
+        setCursor(Qt::BlankCursor);
+    emit bottomDockHoveredChanged();
+    armQuickNeedSync(hovered ? "bottom_dock_show" : "bottom_dock_hide");
+    quick_need_render.storeRelaxed(1);
+    requestOverlayUpdate();
+}
+
+void QmlMainWindow::toggleFullscreenWindow()
+{
+    if (windowState() & Qt::WindowFullScreen)
+        normalTime();
+    else
+        fullscreenTime();
+}
+
+void QmlMainWindow::refreshLiveTelemetry()
+{
+    const qint64 nowMs = static_cast<qint64>(chiaki_time_now_monotonic_us() / 1000);
+    const quint64 framesNow = submitted_frames.loadRelaxed();
+    double fps = live_fps;
+    if (prev_telemetry_ms > 0 && nowMs > prev_telemetry_ms)
+    {
+        const qint64 dt = nowMs - prev_telemetry_ms;
+        if (dt >= 250)
+        {
+            const quint64 df = framesNow >= prev_telemetry_frames ? (framesNow - prev_telemetry_frames) : 0;
+            fps = double(df) * 1000.0 / double(dt);
+            prev_telemetry_frames = framesNow;
+            prev_telemetry_ms = nowMs;
+        }
+    }
+    else
+    {
+        prev_telemetry_frames = framesNow;
+        prev_telemetry_ms = nowMs;
+    }
+
+    bool padConn = false;
+    int padBat = -1;
+    bool padChg = false;
+    bool padFull = false;
+#ifdef _WIN32
+    if (Ds5BtManager::instance().isConnected())
+    {
+        padConn = true;
+        padBat = Ds5BtManager::instance().batteryPercent();
+        padChg = Ds5BtManager::instance().isCharging();
+        padFull = Ds5BtManager::instance().isFullyCharged();
+    }
+    else
+#endif
+    {
+        const int numJoys = SDL_NumJoysticks();
+        for (int i = 0; i < numJoys; ++i)
+        {
+            const SDL_JoystickID jid = SDL_JoystickGetDeviceInstanceID(i);
+            if (jid < 0)
+                continue;
+            if (SDL_Joystick *joy = SDL_JoystickFromInstanceID(jid))
+            {
+                padConn = true;
+                switch (SDL_JoystickCurrentPowerLevel(joy))
+                {
+                case SDL_JOYSTICK_POWER_WIRED: padChg = true; padBat = -1; break;
+                case SDL_JOYSTICK_POWER_MAX:
+                case SDL_JOYSTICK_POWER_FULL: padBat = 100; padFull = true; break;
+                case SDL_JOYSTICK_POWER_MEDIUM: padBat = 65; break;
+                case SDL_JOYSTICK_POWER_LOW: padBat = 25; break;
+                case SDL_JOYSTICK_POWER_EMPTY: padBat = 5; break;
+                default: break;
+                }
+                break;
+            }
+        }
+    }
+
+    const bool changed = (std::abs(fps - live_fps) >= 0.4)
+        || (padConn != gamepad_connected)
+        || (padBat != gamepad_battery)
+        || (padChg != gamepad_charging)
+        || (padFull != gamepad_full);
+    live_fps = fps;
+    gamepad_connected = padConn;
+    gamepad_battery = padBat;
+    gamepad_charging = padChg;
+    gamepad_full = padFull;
+    if (changed)
+        emit liveTelemetryChanged();
+}
+#endif
 
 void QmlMainWindow::requestOverlayUpdate()
 {
@@ -3011,24 +3127,29 @@ void QmlMainWindow::setSettings(Settings *new_settings)
 
 void QmlMainWindow::show()
 {
-    QQmlComponent component(qml_engine, QUrl(QStringLiteral("qrc:/Main.qml")));
-    if (!component.isReady()) {
-        qCCritical(chiakiGui) << "Component not ready\n" << component.errors();
-        QMetaObject::invokeMethod(QGuiApplication::instance(), &QGuiApplication::quit, Qt::QueuedConnection);
-        return;
-    }
-
-    QVariantMap props;
-    props[QStringLiteral("parent")] = QVariant::fromValue(quick_window->contentItem());
-#ifdef PS5LINK_BUILD
-    props[QStringLiteral("quickLaunch")] = qGuiApp->property("ps5linkQuickConnect").toBool();
-    props[QStringLiteral("returnToLauncher")] = qGuiApp->property("ps5linkLauncherSession").toBool();
-#endif
-    quick_item = qobject_cast<QQuickItem*>(component.createWithInitialProperties(props));
     if (!quick_item) {
-        qCCritical(chiakiGui) << "Failed to create root item\n" << component.errors();
-        QMetaObject::invokeMethod(QGuiApplication::instance(), &QGuiApplication::quit, Qt::QueuedConnection);
-        return;
+        QQmlComponent component(qml_engine, QUrl(QStringLiteral("qrc:/Main.qml")));
+        if (!component.isReady()) {
+            qCCritical(chiakiGui) << "Component not ready\n" << component.errors();
+            QMetaObject::invokeMethod(QGuiApplication::instance(), &QGuiApplication::quit, Qt::QueuedConnection);
+            return;
+        }
+
+        QVariantMap props;
+        props[QStringLiteral("parent")] = QVariant::fromValue(quick_window->contentItem());
+#ifdef PS5LINK_BUILD
+        const bool quickConnect = qGuiApp->property("ps5linkQuickConnect").toBool();
+        if (quickConnect)
+            qGuiApp->setProperty("ps5linkQuickConnect", false);
+        props[QStringLiteral("quickLaunch")] = quickConnect;
+        props[QStringLiteral("returnToLauncher")] = qGuiApp->property("ps5linkLauncherSession").toBool();
+#endif
+        quick_item = qobject_cast<QQuickItem*>(component.createWithInitialProperties(props));
+        if (!quick_item) {
+            qCCritical(chiakiGui) << "Failed to create root item\n" << component.errors();
+            QMetaObject::invokeMethod(QGuiApplication::instance(), &QGuiApplication::quit, Qt::QueuedConnection);
+            return;
+        }
     }
 #ifdef PS5LINK_BUILD
     if (qGuiApp->property("ps5linkOpenAdvancedSettings").toBool()) {
@@ -4884,6 +5005,11 @@ void QmlMainWindow::setRtxVsrQuality(int quality)
     if(rtx_vsr_quality.fetchAndStoreRelaxed(quality) == quality)
         return;
     settings->SetRtxVsrQuality(quality);
+    if(quality > 0)
+    {
+        settings->SetDx12DlssSr(0);
+        settings->SetDx12Fsr(false);
+    }
     settings->Sync();
     emit rtxVsrQualityChanged();
     scheduleUpdate(false, UpdateRequestReason::SceneChanged);
@@ -4891,6 +5017,18 @@ void QmlMainWindow::setRtxVsrQuality(int quality)
     Q_UNUSED(quality)
 #endif
 }
+
+#ifdef PS5LINK_BUILD
+void QmlMainWindow::refreshRtxVsrQualityFromSettings()
+{
+    const int quality = qBound(0, settings->GetRtxVsrQuality(), 4);
+    if(rtx_vsr_quality.fetchAndStoreRelaxed(quality) != quality)
+    {
+        emit rtxVsrQualityChanged();
+        scheduleUpdate(false, UpdateRequestReason::SceneChanged);
+    }
+}
+#endif
 
 bool QmlMainWindow::rtxVsrActive() const
 {
@@ -5416,9 +5554,26 @@ renderer_backend_ready:
         qml_engine->setIncubationController(quick_window->incubationController());
     connect(qml_engine, &QQmlEngine::quit, this, &QWindow::close);
 
+    exit_on_stream_exit = exit_app_on_stream_exit;
+    had_active_session = false;
     backend = new QmlBackend(settings, this);
+#ifdef PS5LINK_BUILD
+    connect(backend->qmlSettings(), &QmlSettings::videoSettingsReset, this, &QmlMainWindow::refreshRtxVsrQualityFromSettings);
+    dock_hide_timer = new QTimer(this);
+    dock_hide_timer->setSingleShot(true);
+    connect(dock_hide_timer, &QTimer::timeout, this, [this] {
+        setBottomDockHovered(false);
+    });
+    live_telemetry_timer = new QTimer(this);
+    live_telemetry_timer->setInterval(500);
+    connect(live_telemetry_timer, &QTimer::timeout, this, [this] {
+        if (session && (bottom_dock_hovered || grab_input > 0))
+            refreshLiveTelemetry();
+    });
+    live_telemetry_timer->start();
+#endif
     stats_overlay_widget = new StatsOverlayWidget(this, backend);
-    connect(backend, &QmlBackend::sessionChanged, this, [this, exit_app_on_stream_exit](StreamSession *s) {
+    connect(backend, &QmlBackend::sessionChanged, this, [this](StreamSession *s) {
         const bool preserve_startup_warmup = s && startup_warmup_preserve_next_session_change;
         startup_warmup_preserve_next_session_change = false;
         session = s;
@@ -5507,12 +5662,24 @@ renderer_backend_ready:
             }
             startup_video_visible_pending.storeRelease(0);
         }
-        if(session && exit_app_on_stream_exit)
+        if(session)
         {
-            connect(session, &StreamSession::SessionQuit, qGuiApp, &QGuiApplication::quit);
+            had_active_session = true;
+            if(exit_on_stream_exit)
+                connect(session, &StreamSession::SessionQuit, qGuiApp, &QGuiApplication::quit);
         }
         if(!session)
         {
+#ifdef PS5LINK_BUILD
+            setBottomDockHovered(false);
+            prev_telemetry_ms = 0;
+            live_fps = 0.0;
+#endif
+            if(had_active_session && exit_on_stream_exit)
+            {
+                QMetaObject::invokeMethod(qGuiApp, &QGuiApplication::quit, Qt::QueuedConnection);
+                return;
+            }
             {
                 QMutexLocker locker(&render_schedule_mutex);
                 render_scheduled = false;
@@ -8000,6 +8167,38 @@ bool QmlMainWindow::event(QEvent *event)
         if (static_cast<QMouseEvent*>(event)->source() != Qt::MouseEventNotSynthesized)
             return true;
         if (session && !grab_input) {
+#ifdef PS5LINK_BUILD
+            if (has_video && render_backend != RenderBackend::OpenGL
+                && !settings->GetHideOnScreenControls() && height() > 0) {
+                auto *me = static_cast<QMouseEvent*>(event);
+                const double distFromBottom = double(height()) - me->position().y();
+                const double zone = bottom_dock_hovered ? 108.0 : 60.0;
+                const bool inZone = me->position().y() >= 0.0 && distFromBottom >= 0.0 && distFromBottom <= zone;
+                if (inZone) {
+                    if (dock_hide_timer)
+                        dock_hide_timer->stop();
+                    if (!bottom_dock_hovered)
+                        setBottomDockHovered(true);
+                    QGuiApplication::sendEvent(quick_window, event);
+                    armQuickNeedSync("bottom_dock_mouse");
+                    quick_need_render.storeRelaxed(1);
+                    requestOverlayUpdate();
+                    return true;
+                } else if (bottom_dock_hovered) {
+                    if (event->type() == QEvent::MouseButtonPress) {
+                        setBottomDockHovered(false);
+                    } else {
+                        if (dock_hide_timer && !dock_hide_timer->isActive())
+                            dock_hide_timer->start(650);
+                        QGuiApplication::sendEvent(quick_window, event);
+                        armQuickNeedSync("bottom_dock_mouse_leave");
+                        quick_need_render.storeRelaxed(1);
+                        requestOverlayUpdate();
+                        return true;
+                    }
+                }
+            }
+#endif
             if (event->type() == QEvent::MouseMove)
                 session->HandleMouseMoveEvent(static_cast<QMouseEvent*>(event), width(), height());
             else if (event->type() == QEvent::MouseButtonPress)
@@ -8009,6 +8208,12 @@ bool QmlMainWindow::event(QEvent *event)
             return true;
         }
         QGuiApplication::sendEvent(quick_window, event);
+        break;
+    case QEvent::Leave:
+#ifdef PS5LINK_BUILD
+        if (bottom_dock_hovered && dock_hide_timer && !dock_hide_timer->isActive())
+            dock_hide_timer->start(650);
+#endif
         break;
     case QEvent::MouseButtonDblClick:
         if(!settings->GetFullscreenDoubleClickEnabled())

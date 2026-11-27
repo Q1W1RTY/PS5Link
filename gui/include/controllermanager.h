@@ -36,11 +36,11 @@ class ControllerManager : public QObject
 #endif
 		QMap<int, Controller *> open_controllers;
 		QTimer *poll_timer = nullptr;
-		bool creating_controller_mapping;
-		bool joystick_allow_background_events;
-		bool is_app_active;
-		bool moved;
-		uint8_t dualsense_intensity;
+		bool creating_controller_mapping = false;
+		bool joystick_allow_background_events = false;
+		bool is_app_active = true;
+		bool moved = false;
+		uint8_t dualsense_intensity = 0;
 
 		void ControllerClosed(Controller *controller);
 		void CheckMoved();

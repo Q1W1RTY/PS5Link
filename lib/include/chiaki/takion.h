@@ -173,6 +173,7 @@ typedef struct chiaki_takion_t
 	ChiakiTakionPollTimeout poll_timeout;
 	void *cb_user;
 	chiaki_socket_t sock;
+	uint32_t qos_flow_id;
 	ChiakiThread thread;
 	ChiakiStopPipe stop_pipe;
 	uint32_t tag_local;

@@ -330,6 +330,240 @@ Item {
         }
     }
 
+    // Click outside the bottom settings drawer to dismiss it
+    MouseArea {
+        anchors.fill: parent
+        z: 9
+        visible: !useSeparateMenuWindow && menuController.open
+        onClicked: menuController.close()
+    }
+
+    // Floating bottom hover dock (minimal HUD + quick controls + Settings button)
+    Rectangle {
+        id: bottomHoverDock
+        readonly property bool shown: !useSeparateMenuWindow
+            && Chiaki.window.bottomDockHovered
+            && !menuController.open && !menuController.closing
+            && !sessionLoading && !sessionError
+            && !!Chiaki.session
+            && !Chiaki.settings.hideOnScreenControls
+        onShownChanged: Chiaki.window.requestOverlayUpdate()
+        anchors.horizontalCenter: parent.horizontalCenter
+        z: 9
+        y: shown ? parent.height - height - 14 : parent.height + 18
+        opacity: shown ? 1.0 : 0.0
+        visible: opacity > 0.01
+        width: Math.min(parent.width - 24, dockRow.implicitWidth + 28)
+        height: 46
+        radius: 23
+        color: "#E816161A"
+        border.color: "#3E404B"
+        border.width: 1
+
+        Behavior on y { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+        Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+
+        component DockPillButton: Button {
+            id: dbtn
+            property bool accentFill: false
+            property bool activeGreen: false
+            property bool activeBlue: false
+            implicitHeight: 30
+            topInset: 0
+            bottomInset: 0
+            leftPadding: 11
+            rightPadding: 11
+            font.family: Qt.application.font.family
+            font.pixelSize: 12
+            font.weight: accentFill ? Font.DemiBold : Font.Medium
+            contentItem: Text {
+                text: dbtn.text
+                font: dbtn.font
+                color: "#F0F1F3"
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+            }
+            background: Rectangle {
+                radius: height / 2
+                color: dbtn.accentFill ? (dbtn.down ? "#0768CC" : dbtn.hovered ? "#2494FF" : "#0A84FF")
+                    : dbtn.activeGreen ? (dbtn.hovered ? "#287C44" : "#1F6838")
+                    : dbtn.activeBlue ? (dbtn.hovered ? "#1564C0" : "#0E4F9B")
+                    : dbtn.down ? "#23232B" : dbtn.hovered ? "#3B3C48" : "#2C2D36"
+                border.width: 1
+                border.color: dbtn.accentFill ? "#48A4FF"
+                    : dbtn.activeGreen ? "#38B663"
+                    : dbtn.activeBlue ? "#3B8CE6"
+                    : "#3E404B"
+            }
+        }
+
+        RowLayout {
+            id: dockRow
+            anchors.centerIn: parent
+            spacing: 7
+
+            // Minimal HUD: status dot + FPS + Bitrate + RTT + Gamepad battery
+            Rectangle {
+                width: 8
+                height: 8
+                radius: 4
+                color: (Chiaki.session && Chiaki.session.averagePacketLoss >= 0.01) ? "#FF453A"
+                    : (Chiaki.session && Chiaki.session.connected) ? "#30D158" : "#FF9F0A"
+            }
+            Row {
+                spacing: 3
+                Label {
+                    text: Math.round(Chiaki.window.liveFps || 0).toString()
+                    color: "#F0F1F3"
+                    font.pixelSize: 12
+                    font.weight: Font.DemiBold
+                }
+                Label { text: "FPS"; color: "#9C9CA6"; font.pixelSize: 12 }
+            }
+            Label { text: "·"; color: "#6E707A"; font.pixelSize: 12 }
+            Row {
+                spacing: 3
+                Label {
+                    text: Chiaki.session ? Chiaki.session.measuredBitrate.toFixed(1) : "0.0"
+                    color: "#F0F1F3"
+                    font.pixelSize: 12
+                    font.weight: Font.DemiBold
+                }
+                Label { text: qsTr("Mbps"); color: "#9C9CA6"; font.pixelSize: 12 }
+            }
+            Label {
+                visible: !!Chiaki.session && Chiaki.session.rttMs > 0.1
+                text: "·"
+                color: "#6E707A"
+                font.pixelSize: 12
+            }
+            Row {
+                visible: !!Chiaki.session && Chiaki.session.rttMs > 0.1
+                spacing: 2
+                Label {
+                    text: Chiaki.session ? Math.round(Chiaki.session.rttMs).toString() : "0"
+                    color: "#F0F1F3"
+                    font.pixelSize: 12
+                    font.weight: Font.DemiBold
+                }
+                Label { text: "ms"; color: "#9C9CA6"; font.pixelSize: 12 }
+            }
+            Label {
+                visible: Chiaki.window.gamepadConnected
+                text: "·"
+                color: "#6E707A"
+                font.pixelSize: 12
+            }
+            RowLayout {
+                visible: Chiaki.window.gamepadConnected
+                spacing: 5
+                readonly property int bat: Chiaki.window.gamepadBattery
+                readonly property color batColor: (Chiaki.window.gamepadCharging || Chiaki.window.gamepadFull) ? "#30D158"
+                    : (bat >= 0 && bat <= 15) ? "#FF453A"
+                    : (bat >= 0 && bat <= 30) ? "#FF9F0A" : "#30D158"
+                Item {
+                    implicitWidth: 24
+                    implicitHeight: 12
+                    Rectangle {
+                        x: 0; y: 0; width: 21; height: 12; radius: 3
+                        color: "transparent"
+                        border.color: "#B4B8C4"
+                        border.width: 1.3
+                        Rectangle {
+                            x: 2; y: 2
+                            height: 8; radius: 1.5
+                            width: Math.max(2, Math.round(17 * (Chiaki.window.gamepadBattery >= 0
+                                ? Math.max(0.08, Math.min(1.0, Chiaki.window.gamepadBattery / 100.0)) : 0.65)))
+                            color: parent.parent.parent.batColor
+                        }
+                    }
+                    Rectangle {
+                        x: 22; y: 3; width: 2; height: 6; radius: 1
+                        color: "#B4B8C4"
+                    }
+                }
+                Label {
+                    text: Chiaki.window.gamepadBattery >= 0
+                        ? (Chiaki.window.gamepadCharging && !Chiaki.window.gamepadFull
+                            ? (Chiaki.window.gamepadBattery + "%+")
+                            : (Chiaki.window.gamepadBattery + "%"))
+                        : (Chiaki.window.gamepadCharging ? "USB" : "PAD")
+                    color: parent.batColor
+                    font.pixelSize: 12
+                    font.weight: Font.DemiBold
+                }
+            }
+
+            // Hairline vertical divider
+            Rectangle {
+                implicitWidth: 1
+                implicitHeight: 20
+                Layout.leftMargin: 3
+                Layout.rightMargin: 3
+                color: "#3E404B"
+            }
+
+            // Quick Controls
+            DockPillButton {
+                visible: Chiaki.settings.showMicButton
+                activeGreen: !!Chiaki.session && !Chiaki.session.muted
+                text: (Chiaki.session && !Chiaki.session.muted) ? qsTr("Mic on") : qsTr("Mic muted")
+                onClicked: if (Chiaki.session) Chiaki.session.muted = !Chiaki.session.muted
+            }
+            RowLayout {
+                visible: Chiaki.settings.showVolumeButtons
+                spacing: 4
+                DockPillButton {
+                    text: "−"
+                    leftPadding: 8; rightPadding: 8
+                    onClicked: Chiaki.settings.audioVolume = Math.max(0, Chiaki.settings.audioVolume - 8)
+                }
+                Label {
+                    text: Math.round(Chiaki.settings.audioVolume * 100 / 128) + "%"
+                    color: "#9C9CA6"
+                    font.pixelSize: 12
+                    Layout.minimumWidth: 32
+                    horizontalAlignment: Text.AlignHCenter
+                }
+                DockPillButton {
+                    text: "+"
+                    leftPadding: 8; rightPadding: 8
+                    onClicked: Chiaki.settings.audioVolume = Math.min(128, Chiaki.settings.audioVolume + 8)
+                }
+            }
+            DockPillButton {
+                visible: Chiaki.settings.showAspectButton
+                text: Chiaki.window.videoMode === ChiakiWindow.VideoMode.Zoom ? qsTr("Fill")
+                    : Chiaki.window.videoMode === ChiakiWindow.VideoMode.Stretch ? qsTr("Stretch") : qsTr("Fit")
+                onClicked: {
+                    Chiaki.window.videoMode = Chiaki.window.videoMode === ChiakiWindow.VideoMode.Normal
+                        ? ChiakiWindow.VideoMode.Zoom
+                        : Chiaki.window.videoMode === ChiakiWindow.VideoMode.Zoom
+                            ? ChiakiWindow.VideoMode.Stretch : ChiakiWindow.VideoMode.Normal
+                }
+            }
+            DockPillButton {
+                text: "HUD"
+                activeBlue: Chiaki.settings.showStreamStats
+                onClicked: Chiaki.settings.showStreamStats = !Chiaki.settings.showStreamStats
+            }
+            DockPillButton {
+                text: (view.hostWindow && (view.hostWindow.visibility === Window.FullScreen))
+                    ? qsTr("Window") : qsTr("Fullscreen")
+                onClicked: Chiaki.window.toggleFullscreenWindow()
+            }
+            DockPillButton {
+                accentFill: true
+                text: qsTr("Settings")
+                onClicked: {
+                    Chiaki.window.setBottomDockHovered(false);
+                    menuController.toggle();
+                    Chiaki.window.requestOverlayUpdate();
+                }
+            }
+        }
+    }
+
     Item {
         id: menuView
         anchors {

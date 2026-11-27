@@ -121,7 +121,9 @@ extern "C" __declspec(dllexport) int Ps5LinkVsrEvaluate(VsrContext *context, VkC
 {
     try
     {
-        if(!context || !context->feature || !context->parameters || !commands || !source || !target)
+        if(!context || !context->feature || !context->parameters || !commands
+            || !source || !sourceView || !target || !targetView
+            || sourceWidth == 0 || sourceHeight == 0 || targetWidth == 0 || targetHeight == 0)
             return NVSDK_NGX_Result_FAIL_InvalidParameter;
         const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         auto input = NVSDK_NGX_Create_ImageView_Resource_VK(sourceView, source, range,

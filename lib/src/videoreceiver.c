@@ -222,9 +222,14 @@ static void video_receiver_promote_next_frame(ChiakiVideoReceiver *video_receive
 		return;
 	if(video_receiver->packet_stats)
 		chiaki_frame_processor_report_packet_stats(&video_receiver->frame_processor, video_receiver->packet_stats);
+	// Preserve active stream_stats on frame_processor across the slot swap so
+	// CONNECTIONQUALITY bitrate reporting never mixes in stale counters from next_frame_processor.
+	const ChiakiStreamStats active_stream_stats = video_receiver->frame_processor.stream_stats;
 	ChiakiFrameProcessor tmp = video_receiver->frame_processor;
 	video_receiver->frame_processor = video_receiver->next_frame_processor;
 	video_receiver->next_frame_processor = tmp;
+	video_receiver->frame_processor.stream_stats = active_stream_stats;
+	chiaki_stream_stats_reset(&video_receiver->next_frame_processor.stream_stats);
 	video_receiver->frame_index_cur = video_receiver->next_frame_index;
 	video_receiver->next_frame_index = -1;
 	const int promoted_profile = video_receiver->next_frame_profile;
@@ -298,7 +303,6 @@ CHIAKI_EXPORT void chiaki_video_receiver_av_packet(ChiakiVideoReceiver *video_re
 		&& video_receiver->frame_index_prev != video_receiver->frame_index_cur
 		&& frame_index == (ChiakiSeqNum16)(video_receiver->frame_index_cur + 1))
 	{
-		video_receiver->reorder_waited = true;
 		if(video_receiver->next_frame_index < 0)
 		{
 			err = chiaki_frame_processor_alloc_frame(&video_receiver->next_frame_processor, packet);
@@ -311,6 +315,7 @@ CHIAKI_EXPORT void chiaki_video_receiver_av_packet(ChiakiVideoReceiver *video_re
 			video_receiver->next_frame_deadline_ms = now_ms + reorder_window;
 			video_receiver->next_frame_waited = false;
 		}
+		video_receiver->reorder_waited = true;
 		video_receiver->next_frame_profile = packet->adaptive_stream_index;
 		err = chiaki_frame_processor_put_unit(&video_receiver->next_frame_processor, packet);
 		if(err != CHIAKI_ERR_SUCCESS)

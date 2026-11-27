@@ -186,7 +186,7 @@ public:
     FrameCounts frameCounts() const;
     unsigned dx12PresentedFrames() const;
     unsigned dx12DlssGeneratedFrames() const;
-    bool hasDx12Output() const { return dx12_output != nullptr; }
+    bool hasDx12Output() const { return dx12_output_active.loadRelaxed() != 0; }
     void activateDx12Output();
     bool toggleDx12Menu();
     bool psnScanInProgress() const { return updating_psn_hosts; }
@@ -284,7 +284,7 @@ private:
     };
 
     DisplayServer displayServerAt(int index) const;
-    void connectToServer(const DisplayServer &server, QString nickname);
+    bool connectToServer(const DisplayServer &server, QString nickname);
     bool sendWakeup(const DisplayServer &server);
     bool sendWakeup(const QString &host, const QByteArray &regist_key, bool ps5);
     void updateControllers();
@@ -313,6 +313,7 @@ private:
     PsnConnectState psn_connect_state;
 #ifdef PS5LINK_BUILD
     std::unique_ptr<class Dx12ReplayWindow> dx12_output;
+    QAtomicInteger<int> dx12_output_active{0};
     QAtomicInteger<int> dx12_frame_gap{0};
     QAtomicInteger<quint64> decoded_frames{0};
 #endif

@@ -175,12 +175,13 @@ int real_main(int argc, char *argv[])
     QGuiApplication::setApplicationDisplayName("PS5Link");
     if(hasLauncherSettingsCommand(argc, argv))
         return runLauncherSettingsCommand(argc, argv);
+    QGuiApplication::setApplicationVersion(PS5LINK_VERSION_STR);
 #else
 	QGuiApplication::setOrganizationName("Chiaki");
 	QGuiApplication::setApplicationName("Chiaki");
 	QGuiApplication::setApplicationDisplayName("chiaki-ng");
-#endif
 	QGuiApplication::setApplicationVersion(CHIAKI_VERSION);
+#endif
 #if defined(Q_OS_MACOS)
 	// Use a plain CAMetalLayer for Vulkan windows. Qt's own layer presents in step with each
 	// live resize, but our swapchain presents from the render thread, so every resize step
@@ -400,7 +401,7 @@ int real_main(int argc, char *argv[])
         app.setProperty("ps5linkDlssSr", model == "4.5" ? 2 : 1);
         app.setProperty("ps5linkFsr", false);
     }
-    else if(parser.isSet(rtx_vsr))
+    else if(parser.isSet(rtx_vsr) && !parser.isSet(fsr))
     {
         app.setProperty("ps5linkDlssSr", 0);
         app.setProperty("ps5linkFsr", false);
@@ -558,10 +559,16 @@ int real_main(int argc, char *argv[])
         return Ps5LinkReplay(app, parser.value(replay), parser.isSet(fullscreen_option), parser.isSet(dx12));
 #endif
 
-	Settings settings(parser.isSet(profile_option) ? parser.value(profile_option) : QString());
+	const QString cli_profile = parser.isSet(profile_option) ? parser.value(profile_option) : QString();
+	if(parser.isSet(profile_option) && !Settings::IsValidProfileName(cli_profile))
+	{
+		fprintf(stderr, "Invalid profile name.\n");
+		return 2;
+	}
+	Settings settings(cli_profile);
 	bool exit_app_on_stream_exit = parser.isSet(stream_exit_option);
 	if(parser.isSet(profile_option))
-		settings.SetCurrentProfile(parser.value(profile_option));
+		settings.SetCurrentProfile(cli_profile);
 	Settings alt_settings(parser.isSet(profile_option) ? "" : settings.GetCurrentProfile());
 #ifndef PS5LINK_BUILD
 	if(!settings.GetCurrentProfile().isEmpty())
@@ -581,24 +588,44 @@ int real_main(int argc, char *argv[])
 
 #ifdef PS5LINK_BUILD
 	{
+		auto parseOnOff = [](const QString &raw, bool &out) -> bool {
+			const QString v = raw.trimmed().toLower();
+			if(v == "on" || v == "1" || v == "true") { out = true; return true; }
+			if(v == "off" || v == "0" || v == "false") { out = false; return true; }
+			return false;
+		};
 		Settings *active_settings = use_alt_settings ? &alt_settings : &settings;
 		bool changed_gamepad_settings = false;
 		if(parser.isSet(adaptive_triggers))
 		{
-			const QString v = parser.value(adaptive_triggers).toLower();
-			active_settings->SetEnableAdaptiveTriggers(v == "on" || v == "1" || v == "true");
+			bool on = false;
+			if(!parseOnOff(parser.value(adaptive_triggers), on))
+			{
+				fprintf(stderr, "Expected --adaptive-triggers on or off.\n");
+				return 2;
+			}
+			active_settings->SetEnableAdaptiveTriggers(on);
 			changed_gamepad_settings = true;
 		}
 		if(parser.isSet(haptics_opt))
 		{
-			const QString v = parser.value(haptics_opt).toLower();
-			active_settings->SetEnableRumble(v == "on" || v == "1" || v == "true");
+			bool on = false;
+			if(!parseOnOff(parser.value(haptics_opt), on))
+			{
+				fprintf(stderr, "Expected --haptics on or off.\n");
+				return 2;
+			}
+			active_settings->SetEnableRumble(on);
 			changed_gamepad_settings = true;
 		}
 		if(parser.isSet(bt_speaker))
 		{
-			const QString v = parser.value(bt_speaker).toLower();
-			const bool on = (v == "on" || v == "1" || v == "true");
+			bool on = false;
+			if(!parseOnOff(parser.value(bt_speaker), on))
+			{
+				fprintf(stderr, "Expected --bt-speaker on or off.\n");
+				return 2;
+			}
 			active_settings->SetBtSpeakerAudio(on);
 #ifdef _WIN32
 			Ds5BtManager::instance().setSpeakerAudioEnabled(on);
@@ -607,26 +634,43 @@ int real_main(int argc, char *argv[])
 		}
 		if(parser.isSet(mic_unmuted))
 		{
-			const QString v = parser.value(mic_unmuted).toLower();
-			active_settings->SetStartMicUnmuted(v == "on" || v == "1" || v == "true");
+			bool on = false;
+			if(!parseOnOff(parser.value(mic_unmuted), on))
+			{
+				fprintf(stderr, "Expected --mic-unmuted on or off.\n");
+				return 2;
+			}
+			active_settings->SetStartMicUnmuted(on);
 			changed_gamepad_settings = true;
 		}
 		if(parser.isSet(lightbar_opt))
 		{
-			const QString v = parser.value(lightbar_opt).toLower();
-			const int mode = (v == "off") ? 0 : (v == "screen") ? 2 : (v == "both") ? 3 : 1;
+			const QString v = parser.value(lightbar_opt).trimmed().toLower();
+			int mode = -1;
+			if(v == "off") mode = 0;
+			else if(v == "pad") mode = 1;
+			else if(v == "screen") mode = 2;
+			else if(v == "both") mode = 3;
+			if(mode < 0)
+			{
+				fprintf(stderr, "Expected --lightbar off, pad, screen or both.\n");
+				return 2;
+			}
 			active_settings->SetLightbarMode(mode);
 			changed_gamepad_settings = true;
 		}
 		if(parser.isSet(polling_ms))
 		{
-			const int ms = parser.value(polling_ms).toInt();
-			if(ms == 1 || ms == 2 || ms == 4 || ms == 8)
+			bool ok = false;
+			const int ms = parser.value(polling_ms).toInt(&ok);
+			if(!ok || (ms != 1 && ms != 2 && ms != 4 && ms != 8))
 			{
-				active_settings->SetControllerPollingMs(ms);
-				ControllerManager::GetInstance()->SetPollingIntervalMs(ms);
-				changed_gamepad_settings = true;
+				fprintf(stderr, "Expected --polling-ms 1, 2, 4 or 8.\n");
+				return 2;
 			}
+			active_settings->SetControllerPollingMs(ms);
+			ControllerManager::GetInstance()->SetPollingIntervalMs(ms);
+			changed_gamepad_settings = true;
 		}
 		if(changed_gamepad_settings)
 			active_settings->Sync();

@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 set -euo pipefail
 
-stage="${1:?Usage: collect-windows-notices.sh STAGED_PAYLOAD}"
+stage="${1:?Usage: collect-windows-notices.sh STAGED_PAYLOAD [BUILD_DIR]}"
+build_dir="${2:-build-offline/release/client}"
 prefix=/mingw64
 notices="$stage/LICENSES/MSYS2"
 mkdir -p "$notices"
@@ -53,13 +54,13 @@ if grep -q "^mingw-w64-x86_64-ffmpeg " <<< "$packages"; then
     mkdir -p "$notices/ffmpeg"
     for file in LICENSE.md COPYING.GPLv3 COPYING.LGPLv3; do
         curl --fail --silent --show-error --location --retry 2 \
-            "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n${ffmpeg_version##*:}/$file" \
+            "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n${ffmpeg_version##*[:~]}/$file" \
             --output "$notices/ffmpeg/$file"
     done
 fi
 
 # Licenses for components built as part of the native client.
-cp build-offline/release/client/_deps/ps5link_imgui-src/LICENSE.txt "$stage/LICENSES/Dear-ImGui.txt"
+cp "$build_dir/_deps/ps5link_imgui-src/LICENSE.txt" "$stage/LICENSES/Dear-ImGui.txt"
 cp third-party/curl/COPYING "$stage/LICENSES/curl.txt"
 cp third-party/nanopb/LICENSE.txt "$stage/LICENSES/nanopb.txt"
 cp third-party/cpp-steam-tools/LICENSE "$stage/LICENSES/cpp-steam-tools.txt"
