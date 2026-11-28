@@ -35,13 +35,11 @@ RtxVsrPass::RtxVsrPass(pl_vulkan device) : device(device) {}
 RtxVsrPass::~RtxVsrPass()
 {
     pl_gpu_finish(device->gpu);
-    if(timeline.sem && submittedTimelineValue)
+    if(submittedTimelineValue)
     {
-        VkSemaphoreWaitInfo wait{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
-        wait.semaphoreCount = 1;
-        wait.pSemaphores = &timeline.sem;
-        wait.pValues = &submittedTimelineValue;
-        (void)vkWaitSemaphores(device->device, &wait, 2000000000ULL);
+        device->lock_queue(device, device->queue_graphics.index, 0);
+        vkQueueWaitIdle(queue);
+        device->unlock_queue(device, device->queue_graphics.index, 0);
     }
     if(context)
         destroyFeature(context);
@@ -192,7 +190,7 @@ bool RtxVsrPass::run(int quality)
                 destroyFeature(context);
                 context = nullptr;
             }
-            return fail("initializing the SDK", context ? initRes : code);
+            return fail("initializing the SDK", initRes != VK_SUCCESS ? initRes : code);
         }
         const uint64_t initSignal = ++timelineValue;
         VkTimelineSemaphoreSubmitInfo timelineSubmit{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
@@ -218,11 +216,7 @@ bool RtxVsrPass::run(int quality)
             initRes = vkWaitSemaphores(device->device, &wait, 5000000000ULL);
         }
         if(initRes != VK_SUCCESS)
-        {
-            destroyFeature(context);
-            context = nullptr;
-            return fail("submitting VSR initialization", initRes);
-        }
+            return fail("submitting or waiting for VSR initialization", initRes);
     }
 
     auto hold = [this](pl_tex texture, VkImageLayout layout, uint64_t &outWait) {

@@ -281,6 +281,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 	if(err != CHIAKI_ERR_SUCCESS)
 	{
 		CHIAKI_LOGE(takion->log, "Takion failed to create stop pipe");
+		ret = err;
 		goto error_send_buffer_active_mutex;
 	}
 
@@ -291,6 +292,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 		if(err != CHIAKI_ERR_SUCCESS && err != CHIAKI_ERR_TIMEOUT)
 		{
 			CHIAKI_LOGE(takion->log, "Takion had problem reading extra messages from socket using PSN Connection with error: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
+			ret = err;
 			goto error_sock;
 		}
 		int r = 0;
@@ -459,15 +461,16 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 			ret = CHIAKI_ERR_NETWORK;
 			goto error_sock;
 		}
-		if(r != CHIAKI_ERR_SUCCESS)
-		{
-			ret = err;
-			goto error_sock;
-		}
 	}
 
 	takion->qos_flow_id = chiaki_socket_apply_qos(takion->sock, takion->log);
 	err = chiaki_thread_create(&takion->thread, takion_thread_func, takion);
+	if(err != CHIAKI_ERR_SUCCESS)
+	{
+		CHIAKI_LOGE(takion->log, "Takion failed to start receive thread");
+		ret = err;
+		goto error_sock;
+	}
 
 	chiaki_thread_set_name(&takion->thread, "Chiaki Takion");
 
@@ -476,6 +479,11 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 error_sock:
 	if(!CHIAKI_SOCKET_IS_INVALID(takion->sock))
 	{
+		if(takion->qos_flow_id)
+		{
+			chiaki_socket_remove_qos(takion->sock, takion->qos_flow_id);
+			takion->qos_flow_id = 0;
+		}
 		CHIAKI_SOCKET_CLOSE(takion->sock);
 		takion->sock = CHIAKI_INVALID_SOCKET;
 	}

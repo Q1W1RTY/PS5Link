@@ -14,6 +14,8 @@ AppPublisher=PS5Link
 AppPublisherURL=https://github.com/Q1W1RTY/PS5Link
 AppSupportURL=https://github.com/Q1W1RTY/PS5Link/issues
 AppUpdatesURL=https://github.com/Q1W1RTY/PS5Link/releases
+Uninstallable=not IsPortableUpdate
+CreateUninstallRegKey=not IsPortableUpdate
 UninstallDisplayIcon={app}\PS5LinkLauncher.exe
 DefaultDirName={localappdata}\Programs\PS5Link
 DefaultGroupName=PS5Link
@@ -45,15 +47,12 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; Flags: unchecked
 [InstallDelete]
 Type: filesandordirs; Name: "{app}\LICENSES\MSYS2"
 
-[UninstallDelete]
-Type: filesandordirs; Name: "{localappdata}\PS5Link\Updates"
-
 [Files]
 Source: "{#PackageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\PS5Link"; Filename: "{app}\PS5LinkLauncher.exe"; WorkingDir: "{app}"
-Name: "{autodesktop}\PS5Link"; Filename: "{app}\PS5LinkLauncher.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\PS5Link"; Filename: "{app}\PS5LinkLauncher.exe"; WorkingDir: "{app}"; Check: not IsPortableUpdate
+Name: "{autodesktop}\PS5Link"; Filename: "{app}\PS5LinkLauncher.exe"; WorkingDir: "{app}"; Tasks: desktopicon; Check: not IsPortableUpdate
 
 [Run]
 Filename: "{app}\PS5LinkLauncher.exe"; WorkingDir: "{app}"; Flags: nowait; Check: IsAutomaticUpdate
@@ -81,6 +80,23 @@ end;
 function IsAutomaticUpdate: Boolean;
 begin
   Result := UpdateProcessId > 0;
+end;
+
+function IsPortableUpdate: Boolean;
+var
+  I: Integer;
+begin
+  Result := ExpandConstant('{param:PS5LINKPORTABLE|0}') = '1';
+  if Result or not IsAutomaticUpdate then
+    Exit;
+
+  { PS5Link 1.10.6 sent only /NOICONS for portable updates. }
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/NOICONS') = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
 end;
 
 function InitializeSetup: Boolean;

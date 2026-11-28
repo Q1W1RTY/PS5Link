@@ -53,11 +53,10 @@ internal static class ReleaseUpdate
             !File.Exists(Path.Combine(current, "PS5LinkLauncher.exe")))
             return null;
 
-        string probe = Path.Combine(current, $".ps5link-update-probe-{Environment.ProcessId}.tmp");
+        string probe = Path.Combine(current, $".ps5link-update-probe-{Guid.NewGuid():N}.tmp");
         try
         {
-            using (File.Create(probe)) { }
-            File.Delete(probe);
+            using (new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose)) { }
             return new UpdateTarget(current, IsPortable: true);
         }
         catch (IOException) { return null; }
@@ -87,15 +86,29 @@ internal static class ReleaseUpdate
         return false;
     }
 
-    internal static void CleanupStaleInstaller()
+    internal static void DeleteUpdateFile(string path)
+    {
+        try { File.Delete(path); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private static void PruneUpdateCache(string cache)
     {
         try
         {
-            string installer = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "PS5Link", "Updates", "PS5Link-update.exe");
-            if (File.Exists(installer))
-                File.Delete(installer);
+            var maxAge = DateTime.UtcNow.AddDays(-7);
+            foreach (var file in new DirectoryInfo(cache).EnumerateFiles("PS5Link-update*.exe*"))
+            {
+                bool isLegacy = file.Name == "PS5Link-update.exe";
+                string name = file.Name.EndsWith(".part", StringComparison.Ordinal) ? file.Name[..^5] : file.Name;
+                const string prefix = "PS5Link-update-";
+                bool isAttempt = name.StartsWith(prefix, StringComparison.Ordinal)
+                    && name.EndsWith(".exe", StringComparison.Ordinal)
+                    && Guid.TryParseExact(name.AsSpan(prefix.Length, name.Length - prefix.Length - 4), "N", out _);
+                if ((isLegacy || isAttempt) && file.LastWriteTimeUtc < maxAge)
+                    DeleteUpdateFile(file.FullName);
+            }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -147,8 +160,9 @@ internal static class ReleaseUpdate
     {
         string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PS5Link", "Updates");
         Directory.CreateDirectory(cache);
-        string installer = Path.Combine(cache, "PS5Link-update.exe");
-        string temporary = Path.Combine(cache, $"{Guid.NewGuid():N}.part");
+        PruneUpdateCache(cache);
+        string installer = Path.Combine(cache, $"PS5Link-update-{Guid.NewGuid():N}.exe");
+        string temporary = installer + ".part";
         try
         {
             using var response = await Client.GetAsync(release.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, token);
@@ -174,14 +188,12 @@ internal static class ReleaseUpdate
                 if (total != release.Bytes || !CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), release.Digest))
                     throw new InvalidDataException("The update could not be verified.");
             }
-            File.Move(temporary, installer, overwrite: true);
+            File.Move(temporary, installer);
             return installer;
         }
         finally
         {
-            try { File.Delete(temporary); }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
+            DeleteUpdateFile(temporary);
         }
     }
 
@@ -195,7 +207,10 @@ internal static class ReleaseUpdate
             $"/PS5LINKUPDATEPID={Environment.ProcessId}"
         };
         if (portable)
+        {
             args.Add("/NOICONS");
+            args.Add("/PS5LINKPORTABLE=1");
+        }
         foreach (string argument in args)
             start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new IOException("Could not start PS5Link setup.");

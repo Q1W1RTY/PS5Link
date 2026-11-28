@@ -25,7 +25,8 @@ internal static class ClientRunner
         int Polling);
 
     internal sealed record ConsoleEntry(string Id, string Name, bool Ps5);
-    internal sealed record DiscoveredConsole(string Name, string Address, bool Ps5)
+    internal sealed record DiscoveredConsole(string Name, string Address, bool Ps5,
+        string? Id, string? State, string? RunningApp)
     {
         public override string ToString() => $"{(string.IsNullOrWhiteSpace(Name) ? Ps5 ? "PS5" : "PS4" : Name)} · {Address}";
     }

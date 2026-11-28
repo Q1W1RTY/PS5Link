@@ -29,6 +29,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -832,7 +833,7 @@ struct Dx12ReplayWindow::Pipeline
                 for(UINT idx = 0; ; ++idx)
                 {
                     ComPtr<IDXGIOutput> out;
-                    if(adapter->EnumOutputs(idx, &out) == DXGI_ERROR_NOT_FOUND)
+                    if(FAILED(adapter->EnumOutputs(idx, &out)))
                         break;
                     ComPtr<IDXGIOutput6> out6;
                     DXGI_OUTPUT_DESC1 desc1{};
@@ -884,7 +885,7 @@ struct Dx12ReplayWindow::Pipeline
 
     void releaseSwapchain()
     {
-        try { waitForFence(fenceValue, 5000); } catch(const std::exception &) {}
+        waitForFence(fenceValue, 5000);
         swapchain.Reset();
         swapchainHwnd = nullptr;
         currentSwapchainColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
@@ -2317,7 +2318,6 @@ struct Dx12ReplayWindow::Pipeline
                 if(ImGui::Button(wm == 2 ? ui("Fullscreen", "Весь экран") : ui("Window", "Окно")))
                 {
                     const int next = (wm == 2) ? 0 : 2;
-                    windowMode.store(next);
                     overlayAction(WindowMode, next);
                 }
             }
@@ -2547,10 +2547,7 @@ struct Dx12ReplayWindow::Pipeline
                     int wmode = windowMode.load();
                     drawLabel(ui("Window mode", "Режим окна"));
                     if(combo("##Window mode", &wmode, ui("Fullscreen\0Borderless\0Windowed\0", "Полный экран\0Без рамки\0Окно\0")))
-                    {
-                        windowMode.store(wmode);
                         overlayAction(WindowMode, wmode);
-                    }
                     bool hud = showHud.load();
                     if(toggle(ui("Full performance HUD", "Полная статистика (HUD)"), hud))
                         overlayAction(Hud, hud);
@@ -3346,24 +3343,17 @@ struct Dx12ReplayWindow::RenderWorker
     std::atomic<bool> preparing{false};
     qreal refresh = 60;
     HANDLE wake = nullptr;
-    HANDLE pauseAckEvent = nullptr;
-    HANDLE resumeEvent = nullptr;
-    std::atomic<bool> pauseRequested{false};
-    std::atomic<bool> releaseSwapchainRequested{false};
+    enum class PauseState { Idle, Requested, Releasing, Paused };
+    std::mutex pauseMutex;
+    std::condition_variable pauseChanged;
+    PauseState pauseState = PauseState::Idle;
     std::thread thread;
 
     explicit RenderWorker(Dx12ReplayWindow *owner) : window(owner)
     {
         wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        pauseAckEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        resumeEvent = CreateEventW(nullptr, TRUE, TRUE, nullptr);
-        if(!wake || !pauseAckEvent || !resumeEvent)
-        {
-            if(wake) CloseHandle(wake);
-            if(pauseAckEvent) CloseHandle(pauseAckEvent);
-            if(resumeEvent) CloseHandle(resumeEvent);
+        if(!wake)
             check(HRESULT_FROM_WIN32(GetLastError()), "DX12 render wake event");
-        }
         try
         {
             thread = std::thread([this] { run(); });
@@ -3371,38 +3361,42 @@ struct Dx12ReplayWindow::RenderWorker
         catch(...)
         {
             CloseHandle(wake);
-            CloseHandle(pauseAckEvent);
-            CloseHandle(resumeEvent);
             throw;
         }
     }
 
-    void pause(bool releaseSwapchain)
+    bool pauseForWindowChange()
     {
-        if(!thread.joinable() || stopping.load())
-            return;
-        ResetEvent(pauseAckEvent);
-        ResetEvent(resumeEvent);
-        if(releaseSwapchain)
-            releaseSwapchainRequested.store(true);
-        pauseRequested.store(true);
+        std::unique_lock<std::mutex> lock(pauseMutex);
+        if(stopping.load())
+            return false;
+
+        pauseState = PauseState::Requested;
         SetEvent(wake);
-        WaitForSingleObject(pauseAckEvent, 5000);
+        pauseChanged.wait_for(lock, std::chrono::seconds(5), [this] {
+            return pauseState == PauseState::Idle || pauseState == PauseState::Paused || stopping.load();
+        });
+        if(pauseState == PauseState::Paused && !stopping.load())
+            return true;
+
+        pauseState = PauseState::Idle;
+        return false;
     }
 
     void resume()
     {
-        pauseRequested.store(false);
-        SetEvent(resumeEvent);
+        {
+            std::lock_guard<std::mutex> lock(pauseMutex);
+            pauseState = PauseState::Idle;
+        }
+        pauseChanged.notify_all();
         SetEvent(wake);
     }
 
     void finish()
     {
         stopping.store(true);
-        pauseRequested.store(false);
-        SetEvent(resumeEvent);
-        SetEvent(wake);
+        resume();
         if(thread.joinable())
             thread.join();
     }
@@ -3413,8 +3407,6 @@ struct Dx12ReplayWindow::RenderWorker
         delete pending.exchange(nullptr);
         delete previous.exchange(nullptr);
         CloseHandle(wake);
-        CloseHandle(pauseAckEvent);
-        CloseHandle(resumeEvent);
     }
 
     void applySettings(Pipeline &pipeline)
@@ -3492,15 +3484,31 @@ struct Dx12ReplayWindow::RenderWorker
                 const DWORD waitResult = WaitForSingleObject(wake, waitTimeout);
                 if(waitResult != WAIT_OBJECT_0 && waitResult != WAIT_TIMEOUT)
                     break;
-                if(pauseRequested.load())
                 {
-                    if(releaseSwapchainRequested.exchange(false))
-                        window->pipeline->releaseSwapchain();
-                    SetEvent(pauseAckEvent);
-                    WaitForSingleObject(resumeEvent, INFINITE);
-                    if(stopping.load())
-                        break;
-                    continue;
+                    std::unique_lock<std::mutex> lock(pauseMutex);
+                    if(pauseState == PauseState::Requested)
+                    {
+                        pauseState = PauseState::Releasing;
+                        lock.unlock();
+                        bool released = false;
+                        try
+                        {
+                            window->pipeline->releaseSwapchain();
+                            released = true;
+                        }
+                        catch(const std::exception &error)
+                        {
+                            std::fprintf(stderr, "DX12 swapchain release: %s\n", error.what());
+                        }
+                        lock.lock();
+                        if(pauseState == PauseState::Releasing)
+                            pauseState = released ? PauseState::Paused : PauseState::Idle;
+                        pauseChanged.notify_all();
+                        pauseChanged.wait(lock, [this] { return pauseState != PauseState::Paused; });
+                        if(stopping.load())
+                            break;
+                        continue;
+                    }
                 }
                 HWND target;
                 QSize size;
@@ -3598,6 +3606,7 @@ struct Dx12ReplayWindow::RenderWorker
         catch(const std::exception &error)
         {
             stopping.store(true);
+            resume();
             emit window->renderingFailed(QString::fromUtf8(error.what()));
         }
     }
@@ -3709,8 +3718,6 @@ Dx12ReplayWindow::Dx12ReplayWindow()
                 break;
             case WindowMode:
                 applyWindowMode(value);
-                if(settings)
-                    settings->setDx12WindowMode(value);
                 break;
             case Dither:
                 if(settings)
@@ -3817,13 +3824,16 @@ void Dx12ReplayWindow::bindSession(StreamSession *stream, QmlSettings *profile, 
 void Dx12ReplayWindow::applyWindowMode(int mode)
 {
     mode = std::clamp(mode, 0, 2);
-    pipeline->windowMode.store(mode);
     const Qt::WindowFlags desiredFlags = (mode == 1)
         ? (flags() | Qt::FramelessWindowHint)
         : (flags() & ~Qt::FramelessWindowHint);
     const bool flagsChanging = (desiredFlags != flags());
-    if(worker && flagsChanging)
-        worker->pause(true);
+    if(worker && flagsChanging && !worker->pauseForWindowChange())
+    {
+        std::fprintf(stderr, "DX12 window change skipped: render worker did not release the swapchain\n");
+        return;
+    }
+    pipeline->windowMode.store(mode);
     if(mode == 0)
     {
         if(flagsChanging)
@@ -3851,6 +3861,8 @@ void Dx12ReplayWindow::applyWindowMode(int mode)
     updateViewport();
     if(worker && flagsChanging)
         worker->resume();
+    if(settings)
+        settings->setDx12WindowMode(mode);
 }
 
 void Dx12ReplayWindow::setReplayPreview(int mode, int page)
@@ -4035,8 +4047,6 @@ void Dx12ReplayWindow::keyPressEvent(QKeyEvent *event)
         {
             const int nextMode = pipeline->windowMode.load() == 2 ? 0 : 2;
             applyWindowMode(nextMode);
-            if(settings)
-                settings->setDx12WindowMode(nextMode);
         }
         return;
     }
@@ -4282,7 +4292,6 @@ void Dx12ReplayWindow::mouseDoubleClickEvent(QMouseEvent *event)
     {
         const int nextMode = pipeline->windowMode.load() == 2 ? 0 : 2;
         applyWindowMode(nextMode);
-        settings->setDx12WindowMode(nextMode);
         event->accept();
         return;
     }

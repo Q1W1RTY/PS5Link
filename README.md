@@ -29,6 +29,9 @@ to video, network, controller and appearance settings.
 3. Close the settings window and press **Connect**. If multiple consoles are
    registered, pick one in the **Console** dropdown in the launcher.
 
+The launcher shows the console’s power status on the local network before
+you connect. Checking the status leaves a console in rest mode asleep.
+
 ### Video and controls
 
 - **Video.** Direct3D 12, hardware decoding, HDR on compatible hardware,
@@ -66,6 +69,9 @@ PS5Link передаёт изображение и звук с PS5 или PS4 н
    консоль по коду привязки с экрана PlayStation.
 3. Закройте настройки и нажмите **«Подключиться»**. Если зарегистрировано
    несколько консолей, выберите нужную в списке **«Консоль»** в лаунчере.
+
+До подключения лаунчер показывает состояние консоли в локальной сети.
+Проверка статуса не выводит консоль из режима покоя.
 
 ### Видео и управление
 

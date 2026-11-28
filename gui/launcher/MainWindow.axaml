@@ -129,9 +129,12 @@
         </Border>
 
         <StackPanel Spacing="6">
-          <Grid x:Name="ConsoleRow" IsVisible="False" ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="6,1">
+          <Grid x:Name="ConsoleRow" IsVisible="False" ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto"
+                ColumnSpacing="12" RowSpacing="4" Margin="6,1">
             <TextBlock Text="{DynamicResource LangConsole}" VerticalAlignment="Center" />
             <ComboBox x:Name="ConsolePicker" Grid.Column="1" AutomationProperties.Name="{DynamicResource LangConsole}" />
+            <TextBlock x:Name="ConsoleStatusText" Grid.Row="1" Grid.Column="1" FontSize="12" MaxLines="1"
+                       TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite" />
           </Grid>
           <Button x:Name="Start" Classes="primary" Content="{DynamicResource LangConnect}" Width="252" Height="40" CornerRadius="20"
                   FontSize="14" HorizontalAlignment="Center" Click="StartClient" />

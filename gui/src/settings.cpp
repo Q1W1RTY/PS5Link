@@ -698,7 +698,10 @@ int Settings::RunLauncherSetupCommand(const QString &profile, const QString &ope
         QJsonArray devices;
         for(const auto &host : discovery.GetHosts())
             if(!host.host_addr.isEmpty())
-                devices.append(QJsonObject{{"Name", host.host_name}, {"Address", host.host_addr}, {"Ps5", host.ps5}});
+                devices.append(QJsonObject{{"Name", host.host_name}, {"Address", host.host_addr}, {"Ps5", host.ps5},
+                    {"Id", QString::fromLatin1(QByteArray::fromHex(host.host_id.toLatin1()).toHex())},
+                    {"State", QString::fromLatin1(chiaki_discovery_host_state_string(host.state))},
+                    {"RunningApp", host.running_app_name.trimmed()}});
         const auto response = QJsonDocument(devices).toJson(QJsonDocument::Compact);
         return std::fwrite(response.constData(), 1, response.size(), stdout) == size_t(response.size())
             && std::fflush(stdout) == 0 ? 0 : 1;

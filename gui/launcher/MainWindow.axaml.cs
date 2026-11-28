@@ -27,6 +27,9 @@ internal sealed partial class MainWindow : Window
     private System.Diagnostics.Process? idleMonitor;
     private (string Profile, int Minutes, bool KeepCharging)? idleMonitorPolicy;
     private ClientRunner.ConsoleEntry[] consoles = [];
+    private ClientRunner.DiscoveredConsole[]? discoveredConsoles;
+    private bool consoleStatusFailed;
+    private Task consoleStatusProbe = Task.CompletedTask;
     private string savedConsole = "";
     internal double ViewportHeight => double.IsFinite(Viewport.MaxHeight) ? Math.Max(370, Viewport.MaxHeight) : 760;
     private string loadedProfile = "";
@@ -62,13 +65,13 @@ internal sealed partial class MainWindow : Window
             toggle.IsCheckedChanged += (_, _) => OnSettingChanged();
         foreach (var input in new[] { Timing, Upscale, Generator, Target, Buffer, Lightbar, Polling })
             input.SelectionChanged += (_, _) => OnSettingChanged();
+        ConsolePicker.SelectionChanged += (_, _) => RefreshConsoleStatus();
         Refresh();
     }
 
     protected override async void OnOpened(EventArgs e)
     {
         base.OnOpened(e);
-        ReleaseUpdate.CleanupStaleInstaller();
         if (Screens.ScreenFromWindow(this) is { } screen)
             Viewport.MaxHeight = Math.Max(120, screen.WorkingArea.Height / screen.Scaling - 50);
         if (!ClientRunner.IsAvailable(AppContext.BaseDirectory))
@@ -89,6 +92,8 @@ internal sealed partial class MainWindow : Window
             busy = false;
             Refresh();
         }
+
+        await PollConsoleStatusAsync();
     }
 
     private void OnSettingChanged()
@@ -318,6 +323,94 @@ internal sealed partial class MainWindow : Window
         ConsolePicker.ItemsSource = labels.Prepend(prompt).ToArray();
         ConsolePicker.SelectedIndex = Array.FindIndex(consoles, console => console.Id == selection) + 1;
         ConsoleRow.IsVisible = consoles.Length > 0;
+        RefreshConsoleStatus();
+    }
+
+    private bool ConsoleDiscoveryEnabled => profileSnapshot?.Advanced["Discovery"]?.GetValue<bool>() != false;
+
+    private async Task PollConsoleStatusAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(8));
+        var token = windowLifetime.Token;
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                if (!busy && !updating && IsVisible && WindowState != WindowState.Minimized
+                    && consoles.Length > 0 && ConsoleDiscoveryEnabled)
+                {
+                    consoleStatusProbe = DiscoverConsoleStatusAsync(token);
+                    await consoleStatusProbe;
+                }
+                await timer.WaitForNextTickAsync(token);
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+    }
+
+    private async Task DiscoverConsoleStatusAsync(CancellationToken token)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        try
+        {
+            discoveredConsoles = await ClientRunner.DiscoverConsolesAsync(AppContext.BaseDirectory, deadline.Token);
+            consoleStatusFailed = false;
+        }
+        catch (Exception error) when (IsSettingsError(error))
+        {
+            discoveredConsoles = null;
+            consoleStatusFailed = true;
+            if (!token.IsCancellationRequested)
+                System.Diagnostics.Trace.WriteLine($"PS5Link console discovery: {error.Message}");
+        }
+
+        if (!token.IsCancellationRequested)
+            RefreshConsoleStatus();
+    }
+
+    private void RefreshConsoleStatus()
+    {
+        string id = consoles.Length == 1 ? consoles[0].Id : SelectedConsole;
+        var console = discoveredConsoles?.FirstOrDefault(device =>
+            string.Equals(device.Id, id, StringComparison.OrdinalIgnoreCase));
+
+        string text;
+        string? detail = null;
+        if (id.Length == 0)
+            text = Localize("Выбери консоль для проверки статуса", "Select a console to see its status");
+        else if (!ConsoleDiscoveryEnabled)
+            text = Localize("Поиск по локальной сети выключен", "Local network discovery is disabled");
+        else if (consoleStatusFailed)
+            text = Localize("Не удалось проверить статус", "Could not check console status");
+        else if (discoveredConsoles is null)
+            text = Localize("Проверяем статус…", "Checking console status…");
+        else if (console is null)
+        {
+            bool psnLinked = profileSnapshot?.PsnLinked == true;
+            text = psnLinked
+                ? Localize("Нет ответа по LAN · статус PSN неизвестен", "No LAN response · PSN status unknown")
+                : Localize("Нет ответа по локальной сети", "No response on the local network");
+            detail = psnLinked
+                ? Localize("По PSN состояние питания неизвестно. Можно попробовать подключиться.",
+                    "Power status is unknown over PSN. You can still try to connect.")
+                : Localize("Консоль может быть выключена, загружаться или быть недоступна в этой сети.",
+                    "The console may be off, starting up, or unavailable on this network.");
+        }
+        else
+        {
+            text = console.State switch
+            {
+                "ready" when !string.IsNullOrWhiteSpace(console.RunningApp) =>
+                    Localize($"Включена · {console.RunningApp}", $"On · {console.RunningApp}"),
+                "ready" => Localize("Включена", "On"),
+                "standby" => Localize("Режим покоя", "Rest mode"),
+                _ => Localize("Консоль ответила · статус неизвестен", "Console responded · status unknown")
+            };
+        }
+
+        ConsoleStatusText.Text = text;
+        ToolTip.SetTip(ConsoleStatusText, detail is null ? text : $"{text}\n{detail}");
     }
 
     private async Task SaveClientSettingsAsync()
@@ -685,11 +778,14 @@ internal sealed partial class MainWindow : Window
 
         updating = true;
         bool installerStarted = false;
+        string? installer = null;
         Refresh();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(windowLifetime.Token);
         deadline.CancelAfter(TimeSpan.FromMinutes(6));
         try
         {
+            await consoleStatusProbe;
+            deadline.Token.ThrowIfCancellationRequested();
             var target = ReleaseUpdate.GetUpdateTarget();
             if (target is null)
             {
@@ -714,7 +810,7 @@ internal sealed partial class MainWindow : Window
             }
 
             ShowUpdateFeedback($"Скачиваем версию {release.Version}…", $"Downloading version {release.Version}…");
-            string installer = await ReleaseUpdate.DownloadAsync(release, deadline.Token);
+            installer = await ReleaseUpdate.DownloadAsync(release, deadline.Token);
             deadline.Token.ThrowIfCancellationRequested();
             if (savedPreferences is not null
                 && (savedPreferences != GetPreferences() || savedConsole != SelectedConsole))
@@ -746,6 +842,8 @@ internal sealed partial class MainWindow : Window
         finally
         {
             updating = false;
+            if (!installerStarted && installer is not null)
+                ReleaseUpdate.DeleteUpdateFile(installer);
             if (!installerStarted && !windowLifetime.IsCancellationRequested)
             {
                 RefreshIdleMonitor();
